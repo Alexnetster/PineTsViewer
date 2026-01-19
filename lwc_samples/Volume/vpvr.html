@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Volume Profile (VPVR) Research</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data Generator =====
+        function generateMockOHLCV(bars = 200) {
+            const now = 1704067200;
+            const data = [];
+            let price = 1000;
+            for (let i = 0; i < bars; i++) {
+                const open = price + (Math.random() - 0.5) * 50;
+                const high = open + Math.random() * 30;
+                const low = open - Math.random() * 30;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 20;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({ time: now + i * 86400, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ... (VPVR Primitives) ...
+
+        // ... (Main) ...
+
+
+
+        // ===== VPVR Pane Primitive =====
+        // Reference: docs/external/High Complexity.md
+
+        class VolumeProfileRenderer {
+            constructor() {
+                this._data = null;
+            }
+
+            setData(data) {
+                this._data = data;
+            }
+
+            draw(target) {
+                if (!this._data || !this._data.bins || this._data.bins.length === 0) return;
+
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const { bins, maxVol, widthRatio } = this._data;
+                    const horizontalPixelRatio = scope.horizontalPixelRatio;
+                    const verticalPixelRatio = scope.verticalPixelRatio;
+
+                    ctx.save();
+                    ctx.scale(horizontalPixelRatio, verticalPixelRatio);
+
+                    const canvasWidth = scope.mediaSize.width;
+
+                    // Style config
+                    const barHeightRatio = 0.9; // Spacing between bars
+                    const maxBarWidth = canvasWidth * 0.3; // Take up to 30% of chart width
+
+                    ctx.fillStyle = 'rgba(255, 165, 0, 0.3)'; // Semi-transparent orange
+
+                    for (const bin of bins) {
+                        const yTop = bin.yTop;
+                        const yBottom = bin.yBottom;
+                        const height = Math.abs(yBottom - yTop);
+
+                        // Calculate width based on volume relative to max volume in range
+                        const barWidth = (bin.volume / maxVol) * maxBarWidth;
+
+                        // Draw right-aligned or left-aligned?
+                        // Usually VPVR is right-aligned or left-aligned. Let's do Right-aligned for now since price scale is on right.
+                        // Wait, price scale is usually on right, so maybe Left aligned is better to avoid overlapping scale?
+                        // Or Right aligned but with some padding? Let's try Right Aligned first.
+
+                        const x = canvasWidth - barWidth;
+                        const y = yTop;
+
+                        ctx.fillRect(x, y, barWidth, height * barHeightRatio);
+                    }
+
+                    ctx.restore();
+                });
+            }
+        }
+
+        class VolumeProfilePaneView {
+            constructor(source) {
+                this._source = source;
+                this._renderer = new VolumeProfileRenderer();
+            }
+
+            renderer() {
+                return this._renderer;
+            }
+        }
+
+        class VolumeProfilePrimitive {
+            constructor(dataSource, options = { bins: 50 }) {
+                this._dataSource = dataSource; // full OHLCV data
+                this._options = options;
+                this._paneViews = [new VolumeProfilePaneView(this)];
+                this._chart = null;
+                this._series = null;
+            }
+
+            paneViews() {
+                return this._paneViews;
+            }
+
+            attached(param) {
+                this._chart = param.chart;
+                this._series = param.series;
+                this._requestUpdate = param.requestUpdate;
+
+                // We need to listen to time scale changes to re-calculate bins
+                this._chart.timeScale().subscribeVisibleTimeRangeChange(() => this._update());
+
+                this._update();
+            }
+
+            detached() {
+                this._chart.timeScale().unsubscribeVisibleTimeRangeChange(() => this._update());
+                this._chart = null;
+                this._series = null;
+                this._requestUpdate = null;
+            }
+
+            updateAllViews(param) {
+                this._update();
+            }
+
+            _update() {
+                if (!this._chart || !this._series) return;
+
+                const timeScale = this._chart.timeScale();
+                const visibleRange = timeScale.getVisibleLogicalRange();
+
+                if (!visibleRange) return;
+
+                // 1. Filter Data for Visible Range
+                // Logic: logical indices.
+                // Since our data is array-based and correlates to logical indices (0 to N-1)
+
+                const fromIndex = Math.max(0, Math.floor(visibleRange.from));
+                const toIndex = Math.min(this._dataSource.length - 1, Math.ceil(visibleRange.to));
+
+                if (fromIndex > toIndex) return;
+
+                const visibleData = this._dataSource.slice(fromIndex, toIndex + 1);
+
+                if (visibleData.length === 0) return;
+
+                // 2. Determine Price Range (Min/Max)
+                let minPrice = Infinity;
+                let maxPrice = -Infinity;
+
+                for (const d of visibleData) {
+                    if (d.low < minPrice) minPrice = d.low;
+                    if (d.high > maxPrice) maxPrice = d.high;
+                }
+
+                if (minPrice === Infinity) return;
+
+                // 3. Create Bins
+                const binCount = this._options.bins;
+                const range = maxPrice - minPrice;
+                const binSize = range / binCount;
+
+                const bins = new Array(binCount).fill(0).map(() => ({ volume: 0 }));
+
+                // 4. Distribute Volume
+                for (const d of visibleData) {
+                    // Simple logic: add total volume to the bin corresponding to 'close' price
+                    // Better logic: distribute volume across high-low range?
+                    // For now: use Close price for simplicity
+
+                    // Safety check
+                    if (binSize === 0) continue;
+
+                    let binIndex = Math.floor((d.close - minPrice) / binSize);
+                    if (binIndex >= binCount) binIndex = binCount - 1;
+                    if (binIndex < 0) binIndex = 0;
+
+                    bins[binIndex].volume += d.volume;
+                }
+
+                // 5. Compute Coordinates for Rendering
+                const renderBins = [];
+                let maxVol = 0;
+
+                for (let i = 0; i < binCount; i++) {
+                    if (bins[i].volume > maxVol) maxVol = bins[i].volume;
+
+                    const priceBottom = minPrice + i * binSize;
+                    const priceTop = minPrice + (i + 1) * binSize;
+
+                    // Series API for Coordinate
+                    const yBottom = this._series.priceToCoordinate(priceBottom);
+                    const yTop = this._series.priceToCoordinate(priceTop);
+
+                    if (yBottom !== null && yTop !== null) {
+                        renderBins.push({
+                            yTop,
+                            yBottom,
+                            volume: bins[i].volume
+                        });
+                    }
+                }
+
+                // Update Renderer
+                this._paneViews[0].renderer().setData({
+                    bins: renderBins,
+                    maxVol: maxVol
+                });
+
+                if (this._requestUpdate) this._requestUpdate();
+            }
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main Execution =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart');
+
+            try {
+                log('🚀 Volume Profile (VPVR) Research 시작');
+
+                const ohlcData = generateMockOHLCV(300); // 300 bars
+                log(`✓ Mock 데이터 생성 완료 (${ohlcData.length} bars)`, 'success');
+
+                const chart = createChart(container, {
+                    layout: { background: { color: '#000000' }, textColor: '#DDD' },
+                    grid: { vertLines: { color: '#222' }, horzLines: { color: '#222' } },
+                    width: container.clientWidth || 800,
+                    height: 600,
+                    rightPriceScale: {
+                        scaleMargins: {
+                            top: 0.1,
+                            bottom: 0.1,
+                        },
+                    },
+                });
+
+                window.addEventListener('resize', () => {
+                    chart.applyOptions({ width: container.clientWidth });
+                });
+
+                const candlestickSeries = chart.addSeries(CandlestickSeries);
+                candlestickSeries.setData(ohlcData);
+
+                // Initialize VPVR Primitive
+                const vpvr = new VolumeProfilePrimitive(ohlcData, { bins: 50 });
+
+                // Attach to Series
+                candlestickSeries.attachPrimitive(vpvr);
+                log('✓ VPVR Primitive attached', 'success');
+
+                // Volume Series (Bottom Overlay)
+                const volumeSeries = chart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '', // Overlay
+                });
+                volumeSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.8, bottom: 0 },
+                });
+                volumeSeries.setData(ohlcData.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+                log('✓ Volume 시리즈 추가', 'success');
+
+
+                setTimeout(() => {
+                    chart.timeScale().fitContent();
+                    log('=== ✅ 렌더링 초기화 완료 ===', 'success');
+                }, 100);
+
+            } catch (err) {
+                log(`Critical Error: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #111;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #ff9800;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 20px;
+            height: 600px;
+        }
+
+        #chart {
+            background: #000;
+            border: 1px solid #333;
+            border-radius: 4px;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            margin-bottom: 4px;
+            padding: 2px;
+        }
+
+        .log-success {
+            color: #4caf50;
+        }
+
+        .log-error {
+            color: #f44336;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 8px 16px;
+            background: #333;
+            color: #fff;
+            text-decoration: none;
+            border-radius: 4px;
+        }
+
+        .nav-button:hover {
+            background: #444;
+        }
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    </style>
+</head>
+
+<body>
+    <h1>📊 Volume Profile (VPVR) Research</h1>
+    <div class="subtitle">Custom Pane Primitive Implementation of Visible Range Volume Profile</div>
+
+    <div class="container">
+        <div id="chart"></div>
+        <div id="log"></div>
+    </div>
+
+    <div style="margin-top: 20px;">
+        <a href="../index.html" class="nav-button">⬅️ Back to Index</a>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>기본 동작</strong>: LWC 차트 렌더링 및 지표 계산.</li>
+            <li><strong>특이 사항</strong>: (자동 생성됨) 별도 구현 상세 내용 필요.</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Rows (Bins)</strong>: [범위: 10~1000] 가로 막대 개수 (기본값: 24). 정밀도 결정.</li>
+            <li><strong>Value Area Volume</strong>: [범위: 0~100] 거래량이 집중된 핵심 구간 비율 (기본값: 70%).</li>
+            <li><strong>장점</strong>: 특정 가격대의 매물대 파악. 강력한 지지/저항 레벨 식별.</li>
+            <li><strong>사용법</strong>: POC(가장 긴 막대)는 강력한 자석 역할. 매물대가 얇은 구간(Low Volume Node)은 빠른 통과 예상.</li>
+            <li><strong>추천 시간대</strong>: 전 시간대. 스캘핑 시 1분봉에 켜놓고 주요 매물대 이탈 확인.</li>
+            <li><strong>비추천</strong>: 거래량이 매우 적은 잡주/알트코인(신뢰도 낮음).</li>
+            <li><strong>시너지 지표</strong>: Support/Resistance Lines, Pivot Points.</li>
+        </ul>
+    
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>브라우저 콘솔에서 <code>JSON.stringify(window.referenceData)</code> 확인.</li>
+            <li>차트 렌더링 상태 시각적 점검.</li>
+        </ul>
+    </div>
+
+    </body>
+
+</html>

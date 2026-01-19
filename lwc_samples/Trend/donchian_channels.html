@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Donchian Channels Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 200) {
+            const now = 1704067200;
+            const data = [];
+            let price = 100;
+            for (let i = 0; i < bars; i++) {
+                const trend = Math.sin(i / 50) * 10;
+                const open = price + trend * 0.1 + (Math.random() - 0.5) * 2;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({ time: now + i * 86400, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ... (Donchian Logic) ...
+
+        // ... (Main) ...
+
+
+
+        // ===== Donchian Logic =====
+        function ta_donchian(data, length = 20) {
+            const result = [];
+            const upper = [];
+            const lower = [];
+            const mid = [];
+
+            for (let i = 0; i < data.length; i++) {
+                if (i < length - 1) {
+                    // Not enough data
+                    // Can push NaN or previous valid? Usually NaN or lookback what is available
+                    upper.push(NaN); lower.push(NaN); mid.push(NaN);
+                    continue;
+                }
+
+                let maxH = -Infinity;
+                let minL = Infinity;
+
+                // Loop back 'length' bars including current? usually High[1]..High[length] for breakout strategies, 
+                // But standard indicator usually includes current bar or shift logic depends.
+                // TradingView `ta.highest(high, length)` includes current bar.
+                for (let j = 0; j < length; j++) {
+                    const idx = i - j;
+                    if (data[idx].high > maxH) maxH = data[idx].high;
+                    if (data[idx].low < minL) minL = data[idx].low;
+                }
+
+                upper.push(maxH);
+                lower.push(minL);
+                mid.push((maxH + minL) / 2);
+            }
+
+            return {
+                upper: upper.map((v, i) => ({ time: data[i].time, value: v })),
+                lower: lower.map((v, i) => ({ time: data[i].time, value: v })),
+                mid: mid.map((v, i) => ({ time: data[i].time, value: v }))
+            };
+        }
+
+
+        // ===== Channel Fill Primitive (Reused) =====
+        class ChannelFillRenderer {
+            constructor() { this._data = null; }
+            setData(data) { this._data = data; }
+            draw(target) {
+                if (!this._data || this._data.length === 0) return;
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const data = this._data;
+                    const horizontalPixelRatio = scope.horizontalPixelRatio;
+                    const verticalPixelRatio = scope.verticalPixelRatio;
+
+                    ctx.save();
+                    ctx.scale(horizontalPixelRatio, verticalPixelRatio);
+                    ctx.beginPath();
+
+                    let started = false;
+                    for (let i = 0; i < data.length; i++) {
+                        const item = data[i];
+                        if (item.x1 === null || item.y1 === null) continue;
+                        if (!started) { ctx.moveTo(item.x1, item.y1); started = true; }
+                        else { ctx.lineTo(item.x1, item.y1); }
+                    }
+                    for (let i = data.length - 1; i >= 0; i--) {
+                        const item = data[i];
+                        if (item.x2 === null || item.y2 === null) continue;
+                        ctx.lineTo(item.x2, item.y2);
+                    }
+
+                    if (started) {
+                        ctx.closePath();
+                        ctx.fillStyle = 'rgba(255, 109, 0, 0.15)'; // Orange tint for Donchian
+                        ctx.fill();
+                    }
+                    ctx.restore();
+                });
+            }
+        }
+
+        class ChannelFillPrimitive {
+            constructor(params) {
+                this._paneViews = [{ renderer: () => this._renderer, zOrder: () => 'bottom' }];
+                this._renderer = new ChannelFillRenderer();
+                this._param = params;
+                this._rendererObj = this._paneViews[0]; // hack simple wrapper
+            }
+            paneViews() { return this._paneViews; }
+            attached(param) {
+                this._chart = param.chart;
+                this._requestUpdate = param.requestUpdate;
+                this._updateWithData();
+                this._chart.timeScale().subscribeVisibleLogicalRangeChange(() => this._updateWithData());
+            }
+            detached() { }
+            updateAllViews() { this._updateWithData(); }
+
+            setData(data) {
+                this._data = data;
+                this._updateWithData();
+            }
+
+            _updateWithData() {
+                if (!this._chart || !this._requestUpdate || !this._data || !this._param) return;
+                const timeScale = this._chart.timeScale();
+                const series1 = this._param.upper;
+                const series2 = this._param.lower;
+
+                const points = [];
+                for (const d of this._data) {
+                    const x = timeScale.timeToCoordinate(d.time);
+                    if (x === null) continue;
+                    const y1 = series1.priceToCoordinate(d.upper);
+                    const y2 = series2.priceToCoordinate(d.lower);
+                    if (y1 === null || y2 === null) continue;
+
+                    points.push({ x1: x, y1, x2: x, y2 });
+                }
+
+                this._renderer.setData(points);
+                this._requestUpdate();
+            }
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart');
+
+            try {
+                log('🚀 Donchian Channels Reference 시작');
+                const data = generateMockOHLCV(300);
+                log(`✓ ${data.length}개 바 생성 완료`, 'success');
+
+                const chart = createChart(container, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    width: container.clientWidth,
+                    height: 500,
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const candleSeries = chart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+                });
+                candleSeries.setData(data);
+                log('✓ Candlestick 시리즈 추가', 'success');
+
+                // Volume Series
+                const volumeSeries = chart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '', // Overlay
+                });
+                volumeSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.8, bottom: 0 },
+                });
+                volumeSeries.setData(data.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+                log('✓ Volume 시리즈 추가', 'success');
+
+                // Calculate Donchian
+                const donchianData = ta_donchian(data, 20);
+
+                const upperSeries = chart.addSeries(LineSeries, { color: '#FF6D00', lineWidth: 1, title: 'Upper' });
+                const midSeries = chart.addSeries(LineSeries, { color: '#9E9E9E', lineWidth: 1, title: 'Mid', lineStyle: 2 }); // Dashed mid
+                const lowerSeries = chart.addSeries(LineSeries, { color: '#FF6D00', lineWidth: 1, title: 'Lower' });
+
+                upperSeries.setData(donchianData.upper.filter(d => !isNaN(d.value)));
+                midSeries.setData(donchianData.mid.filter(d => !isNaN(d.value)));
+                lowerSeries.setData(donchianData.lower.filter(d => !isNaN(d.value)));
+                log('✓ Donchian Line Series 추가', 'success');
+
+                // Add Fill
+                // Prepare combined data
+                const combinedData = [];
+                for (let i = 0; i < data.length; i++) {
+                    // only valid data
+                    if (!isNaN(donchianData.upper[i].value) && !isNaN(donchianData.lower[i].value)) {
+                        combinedData.push({
+                            time: data[i].time,
+                            upper: donchianData.upper[i].value,
+                            lower: donchianData.lower[i].value
+                        });
+                    }
+                }
+
+                const fillPrimitive = new ChannelFillPrimitive({ upper: upperSeries, lower: lowerSeries });
+                upperSeries.attachPrimitive(fillPrimitive);
+                fillPrimitive.setData(combinedData);
+
+                log('✓ Donchian Fill Primitive 추가', 'success');
+
+
+                setTimeout(() => {
+                    chart.timeScale().fitContent();
+                    log('✓ 차트 뷰포트 자동 조정 완료', 'success');
+                }, 100);
+
+                // Auto Resize
+                window.addEventListener('resize', () => {
+                    chart.applyOptions({ width: container.clientWidth });
+                });
+
+
+                // ===== Data Dump (Verification) =====
+                window.referenceData = {
+                    ohlc: data,
+                    donchian: donchianData
+                };
+                log('💾 window.referenceData에 검증 데이터 저장됨', 'info');
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 500px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    </style>
+</head>
+
+<body>
+    <h1>📊 Donchian Channels Reference</h1>
+    <div class="subtitle">Pine Script: donchian.pine → Pure LWC TypeScript Implementation (Channel Fill)</div>
+
+    <div class="container">
+        <div id="chart"></div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>Bounds</strong>: Highest High / Lowest Low (Period 20)</li>
+            <li><strong>Rendering</strong>: 3 Line Series + Orange Channel Fill</li>
+            <li><strong>Logic</strong>: Standard Donchian (Price Channel)</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>상단 밴드가 N기간 최고가, 하단 밴드가 최저가를 따라가는지 확인</li>
+            <li>주황색 영역 채우기(Fill)가 정상 표시되는지 확인</li>
+            <li><code>JSON.stringify(window.referenceData)</code>로 계산 값 검증</li>
+        </ul>
+    </div>
+
+    
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Length</strong>: [범위: 1+] 기간 (기본값: 20). 해당 기간의 최고가/최저가 사용.</li>
+            <li><strong>장점</strong>: 가격의 절대적인 고점과 저점을 시각화. 박스권 돌파 매매에 유용.</li>
+            <li><strong>사용법</strong>: 상단 밴드 돌파 시 신고가(매수), 하단 밴드 이탈 시 신저가(매도).</li>
+            <li><strong>추천 시간대</strong>: 4시간봉(H4), 일봉(D1), 주봉(W1). 터틀 트레이딩 전략의 핵심.</li>
+            <li><strong>비추천</strong>: 횡보장, 휩소가 많은 짧은 분봉.</li>
+            <li><strong>시너지 지표</strong>: ATR(손절폭 설정), Moving Average.</li>
+        </ul>
+    
+    </div>
+
+    <div style="text-align: center; margin-bottom: 30px;">
+        <a href="../index.html" class="nav-button">⬅️ 샘플 목록으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

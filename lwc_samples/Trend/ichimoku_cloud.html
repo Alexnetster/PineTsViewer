@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ichimoku Cloud Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 400) {
+            const now = 1704067200;
+            const data = [];
+            let price = 100;
+            for (let i = 0; i < bars; i++) {
+                const trend = Math.sin(i / 60) * 15;
+                const open = price + trend * 0.05 + (Math.random() - 0.5) * 3;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({ time: now + i * 86400, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ... (Ichimoku Logic) ...
+
+        // ... (Main) ...
+
+
+
+        // ===== Ichimoku Logic =====
+        function ta_ichimoku(data) {
+            const conversionLen = 9;
+            const baseLen = 26;
+            const spanBLen = 52;
+            const displacement = 26;
+
+            function donchian(idx, len) {
+                if (idx < len - 1) return NaN;
+                let min = Infinity, max = -Infinity;
+                for (let j = 0; j < len; j++) {
+                    min = Math.min(min, data[idx - j].low);
+                    max = Math.max(max, data[idx - j].high);
+                }
+                return (min + max) / 2;
+            }
+
+            const lastTime = data[data.length - 1].time;
+            const futureData = [];
+            for (let i = 1; i <= displacement; i++) {
+                futureData.push({ time: lastTime + i * 86400 });
+            }
+
+            const allData = [...data, ...futureData];
+            const results = allData.map(d => ({
+                time: d.time, conversion: NaN, base: NaN, lagging: NaN, spanA: NaN, spanB: NaN
+            }));
+
+            for (let i = 0; i < data.length; i++) {
+                const conversion = donchian(i, conversionLen);
+                const base = donchian(i, baseLen);
+                const spanB = donchian(i, spanBLen);
+
+                results[i].conversion = conversion;
+                results[i].base = base;
+
+                if (i >= displacement) results[i - displacement].lagging = data[i].close;
+
+                if (!isNaN(conversion) && !isNaN(base)) {
+                    const spanA_val = (conversion + base) / 2;
+                    if (i + displacement - 1 < results.length) results[i + displacement - 1].spanA = spanA_val;
+                }
+
+                if (!isNaN(spanB)) {
+                    if (i + displacement - 1 < results.length) results[i + displacement - 1].spanB = spanB;
+                }
+            }
+            return results;
+        }
+
+        // ===== Ichimoku Cloud Primitive (Official Pattern) =====
+        // Reference: https://tradingview.github.io/lightweight-charts/plugin-examples/
+
+        class IchimokuCloudPaneRenderer {
+            constructor() {
+                this._data = null;
+            }
+
+            setData(data) {
+                this._data = data;
+            }
+
+            draw(target) {
+                if (!this._data || this._data.fillBlocks.length === 0) return;
+
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const horizontalPixelRatio = scope.horizontalPixelRatio;
+                    const verticalPixelRatio = scope.verticalPixelRatio;
+
+                    ctx.save();
+                    ctx.scale(horizontalPixelRatio, verticalPixelRatio);
+
+                    if (this._data.fillBlocks) {
+                        for (const block of this._data.fillBlocks) {
+                            ctx.beginPath();
+                            const p = block.points;
+                            if (p.length === 0) continue;
+
+                            ctx.moveTo(p[0].x, p[0].yA);
+                            for (let i = 1; i < p.length; i++) {
+                                ctx.lineTo(p[i].x, p[i].yA);
+                            }
+                            for (let i = p.length - 1; i >= 0; i--) {
+                                ctx.lineTo(p[i].x, p[i].yB);
+                            }
+                            ctx.closePath();
+
+                            ctx.fillStyle = block.color;
+                            ctx.fill();
+                        }
+                    }
+
+                    ctx.restore();
+                });
+            }
+        }
+
+        class IchimokuCloudPaneView {
+            constructor(source) {
+                this._source = source;
+                this._renderer = new IchimokuCloudPaneRenderer();
+            }
+            renderer() { return this._renderer; }
+        }
+
+        class IchimokuCloudPrimitive {
+            constructor(spanASeries, spanBSeries, upColor, downColor) {
+                this._spanA = spanASeries;
+                this._spanB = spanBSeries;
+                this._upColor = upColor;
+                this._downColor = downColor;
+                this._paneViews = [new IchimokuCloudPaneView(this)];
+                this._data = { spanA: [], spanB: [] };
+            }
+
+            setData(spanAData, spanBData) {
+                this._data.spanA = spanAData;
+                this._data.spanB = spanBData;
+                this._update();
+            }
+
+            paneViews() { return this._paneViews; }
+
+            attached(param) {
+                this._chart = param.chart;
+                this._requestUpdate = param.requestUpdate;
+                this._update();
+            }
+
+            detached() {
+                this._chart = null;
+                this._requestUpdate = null;
+            }
+
+            updateAllViews(param) { this._update(); }
+
+            zOrder() { return 'bottom'; }
+
+            _update() {
+                if (!this._chart || !this._requestUpdate) return;
+
+                const timeScale = this._chart.timeScale();
+                if (!timeScale) return;
+
+                const spanAData = this._data.spanA;
+                const spanBData = this._data.spanB;
+
+                if (spanAData.length === 0 || spanBData.length === 0) return;
+
+                const spanBMap = new Map();
+                spanBData.forEach(d => spanBMap.set(d.time, d.value));
+
+                const fillBlocks = [];
+                let currentBlock = null;
+
+                for (let i = 0; i < spanAData.length; i++) {
+                    const a = spanAData[i];
+                    const bVal = spanBMap.get(a.time);
+                    if (bVal === undefined) continue;
+
+                    const x = timeScale.timeToCoordinate(a.time);
+                    if (x === null) continue;
+
+                    // Series API: Use stored series reference for coordinate conversion
+                    const yA = this._spanA.priceToCoordinate(a.value);
+                    const yB = this._spanB.priceToCoordinate(bVal);
+
+                    if (yA === null || yB === null) continue;
+
+                    const isUp = a.value >= bVal;
+                    const color = isUp ? this._upColor : this._downColor;
+
+                    // Start a new block if color changes or no block exists
+                    if (!currentBlock || currentBlock.color !== color) {
+                        currentBlock = { color: color, points: [] };
+                        fillBlocks.push(currentBlock);
+
+                        // Add previous point to start new block for continuity (if possible and applicable)
+                        // For simplicity in this mock, we just start fresh. 
+                        // Visual gaps might appear at cross-over if we don't interpolate.
+                        // Ideally we calculate the intersection point.
+                        // Since this is a sample, we will accept single pixel gaps or overlapping blocks.
+                    }
+
+                    currentBlock.points.push({ x, yA, yB });
+                }
+
+                this._paneViews[0].renderer().setData({
+                    fillBlocks: fillBlocks
+                });
+
+                this._requestUpdate();
+            }
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart');
+            try {
+                log('🚀 Ichimoku Cloud 시작');
+                const data = generateMockOHLCV(300);
+                log(`✓ ${data.length}개 바 생성 완료`, 'success');
+
+                const chart = createChart(container, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    width: container.clientWidth,
+                    height: 600,
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const candleSeries = chart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+                });
+                candleSeries.setData(data);
+                log('✓ Candlestick 시리즈 추가', 'success');
+
+                // Volume Series
+                const volumeSeries = chart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '', // Overlay
+                });
+                volumeSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.8, bottom: 0 },
+                });
+                volumeSeries.setData(data.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+                log('✓ Volume 시리즈 추가', 'success');
+
+                const ichi = ta_ichimoku(data);
+                log('✓ 일목균형표 데이터 계산 완료', 'success');
+
+                // 1. Tenkan-sen
+                // 1. Tenkan-sen
+                const conversionSeries = chart.addSeries(LineSeries, { color: '#2962FF', lineWidth: 2, title: 'Tenkan (Conversion)' });
+                conversionSeries.setData(ichi.map(d => ({ time: d.time, value: d.conversion })).filter(d => !isNaN(d.value)));
+                log('✓ 전환선(Tenkan) 추가', 'info');
+
+                // 2. Kijun-sen
+                // 2. Kijun-sen
+                const baseSeries = chart.addSeries(LineSeries, { color: '#B71C1C', lineWidth: 2, title: 'Kijun (Base)' });
+                baseSeries.setData(ichi.map(d => ({ time: d.time, value: d.base })).filter(d => !isNaN(d.value)));
+                log('✓ 기준선(Kijun) 추가', 'info');
+
+                // 3. Lagging Span
+                // 3. Lagging Span
+                const laggingSeries = chart.addSeries(LineSeries, { color: '#43A047', lineWidth: 2, title: 'Chikou (Lagging)' });
+                laggingSeries.setData(ichi.map(d => ({ time: d.time, value: d.lagging })).filter(d => !isNaN(d.value)));
+                log('✓ 후행스팬(Chikou) 추가', 'info');
+
+                // 4. Cloud Outlines
+                // 4. Cloud Outlines
+                const spanASeries = chart.addSeries(LineSeries, { color: '#009688', lineWidth: 2, title: 'Span A' });
+                spanASeries.setData(ichi.map(d => ({ time: d.time, value: d.spanA })).filter(d => !isNaN(d.value)));
+
+                const spanBSeries = chart.addSeries(LineSeries, { color: '#E91E63', lineWidth: 2, title: 'Span B' });
+                spanBSeries.setData(ichi.map(d => ({ time: d.time, value: d.spanB })).filter(d => !isNaN(d.value)));
+
+                log('✓ 선행스팬 A/B 아웃라인 추가', 'info');
+
+                // 5. Cloud Fill
+                // 5. Ichimoku Cloud Fill (Official Pattern)
+                const spanAData = ichi.map(d => ({ time: d.time, value: d.spanA })).filter(d => !isNaN(d.value));
+                const spanBData = ichi.map(d => ({ time: d.time, value: d.spanB })).filter(d => !isNaN(d.value));
+
+                const cloudPrimitive = new IchimokuCloudPrimitive(
+                    spanASeries,
+                    spanBSeries,
+                    'rgba(76, 175, 80, 0.2)',  // Up Color (Green) 
+                    'rgba(239, 83, 80, 0.2)'   // Down Color (Red)
+                );
+
+                cloudPrimitive.setData(spanAData, spanBData);
+
+                // Attach to Span A series
+                spanASeries.attachPrimitive(cloudPrimitive);
+
+                log('✓ 구름대(Cloud) Dual-Color Fill 추가 (ISeriesPrimitive)', 'success');
+
+                setTimeout(() => {
+                    chart.timeScale().fitContent();
+                    log('✓ 차트 뷰포트 자동 조정 완료', 'success');
+                }, 100);
+
+
+                // ===== Data Dump (Verification) =====
+                window.referenceData = {
+                    ohlc: data,
+                    ichimoku: ichi
+                };
+                log('💾 window.referenceData에 검증 데이터 저장됨', 'info');
+                log('콘솔에서 JSON.stringify(window.referenceData) 실행 가능', 'info');
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    </style>
+</head>
+
+<body>
+    <h1>📊 Ichimoku Cloud Reference</h1>
+    <div class="subtitle">Pine Script: ichimoku.pine → Pure LWC TypeScript Implementation with Cloud Fill</div>
+
+    <div class="container">
+        <div id="chart"></div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>Tenkan-sen (전환선)</strong>: 9기간 (<code>Blue</code>)</li>
+            <li><strong>Kijun-sen (기준선)</strong>: 26기간 (<code>Red</code>)</li>
+            <li><strong>Chikou Span (후행스팬)</strong>: 종가를 26기간 과거로 이동 (<code>Green</code>)</li>
+            <li><strong>Senkou Span A/B (선행스팬)</strong>: 26기간 미래로 이동</li>
+            <li><strong>Kumo (구름대)</strong>: Span A와 Span B 사이 영역 채우기</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>브라우저 콘솔에서 <code>JSON.stringify(window.referenceData)</code> 실행</li>
+            <li>PineTS 컴파일 결과와 변환된 일목균형표 값(전환선, 기준선, 스팬 A/B) 비교</li>
+            <li>구름대(fill)가 선행스팬 A/B 사이에 정확히 그려지는지 시각적 확인</li>
+        </ul>
+    </div>
+
+    
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Conversion Line Periods</strong>: [범위: 1+] 전환선 기간 (기본값: 9). 단기 추세.</li>
+            <li><strong>Base Line Periods</strong>: [범위: 1+] 기준선 기간 (기본값: 26). 중기 추세.</li>
+            <li><strong>Lagging Span 2 Periods</strong>: [범위: 1+] 선행스팬2 계산 기간 (기본값: 52). 장기 추세.</li>
+            <li><strong>Displacement</strong>: [범위: 1+] 선행/후행 스팬 이동 값 (기본값: 26). 예측 및 확인용.</li>
+            <li><strong>장점</strong>: 지지/저항, 추세 방향, 모멘텀을 한눈에 파악.</li>
+            <li><strong>사용법</strong>: 구름대 위는 상승 추세, 아래는 하락 추세. 전환선이 기준선을 상향 돌파하면 매수 신호.</li>
+            <li><strong>추천 시간대</strong>: 4시간봉(H4), 일봉(D1). (일본식 지표는 일봉 기준 최적화 경향)</li>
+            <li><strong>비추천</strong>: 1분봉, 5분봉. (구름대가 얇아 신뢰도 하락)</li>
+            <li><strong>시너지 지표</strong>: RSI, Price Action(캔들 패턴).</li>
+        </ul>
+    
+    </div>
+
+    <div style="text-align: center; margin-bottom: 30px;">
+        <a href="../index.html" class="nav-button">⬅️ 샘플 목록으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bollinger Bands Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data Generator =====
+        function generateMockOHLCV(bars = 100) {
+            const now = 1704067200; // 2024-01-01 00:00:00 UTC
+            const data = [];
+            let price = 100;
+            for (let i = 0; i < bars; i++) {
+                const open = price + (Math.random() - 0.5) * 2;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({
+                    time: now + i * 86400,
+                    open, high, low, close, volume
+                });
+                price = close;
+            }
+            return data;
+        }
+
+        // ... (Bollinger Bands Calculator) ...
+
+        // ... (Main) ...
+
+
+
+        // ===== Bollinger Bands Calculator =====
+        function calculateSMA(data, period) {
+            const sma = [];
+            for (let i = 0; i < data.length; i++) {
+                if (i < period - 1) {
+                    sma.push(NaN);
+                } else {
+                    let sum = 0;
+                    for (let j = 0; j < period; j++) {
+                        sum += data[i - j].close;
+                    }
+                    sma.push(sum / period);
+                }
+            }
+            return sma;
+        }
+
+        function calculateStdDev(data, sma, period) {
+            const stdDev = [];
+            for (let i = 0; i < data.length; i++) {
+                if (i < period - 1 || isNaN(sma[i])) {
+                    stdDev.push(NaN);
+                } else {
+                    let sumSq = 0;
+                    for (let j = 0; j < period; j++) {
+                        sumSq += Math.pow(data[i - j].close - sma[i], 2);
+                    }
+                    stdDev.push(Math.sqrt(sumSq / period));
+                }
+            }
+            return stdDev;
+        }
+
+        function calculateBB(data, period = 20, mult = 2) {
+            const basis = calculateSMA(data, period);
+            const dev = calculateStdDev(data, basis, period);
+            const upper = [];
+            const lower = [];
+            for (let i = 0; i < data.length; i++) {
+                if (isNaN(basis[i]) || isNaN(dev[i])) {
+                    upper.push(NaN);
+                    lower.push(NaN);
+                } else {
+                    upper.push(basis[i] + mult * dev[i]);
+                    lower.push(basis[i] - mult * dev[i]);
+                }
+            }
+            return { basis, upper, lower };
+        }
+
+        // ===== Bollinger Band Fill Primitive (Official Pattern) =====
+        // Reference: https://tradingview.github.io/lightweight-charts/plugin-examples/
+
+        class BollingerBandFillPaneRenderer {
+            constructor() {
+                this._data = null;
+            }
+
+            setData(data) {
+                this._data = data;
+            }
+
+            draw(target) {
+                if (!this._data || this._data.points.length < 2) return;
+
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const { points, fillColor } = this._data;
+                    const horizontalPixelRatio = scope.horizontalPixelRatio;
+                    const verticalPixelRatio = scope.verticalPixelRatio;
+
+                    ctx.save();
+                    // Scale context to match the high-DPI coordinate space
+                    ctx.scale(horizontalPixelRatio, verticalPixelRatio);
+
+                    ctx.beginPath();
+
+                    // 1. Move to first point of Upper Line
+                    if (points.length > 0) {
+                        ctx.moveTo(points[0].x, points[0].yUpper);
+                    }
+
+                    // 2. Line to rest of Upper Line
+                    for (let i = 1; i < points.length; i++) {
+                        const p = points[i];
+                        ctx.lineTo(p.x, p.yUpper);
+                    }
+
+                    // 3. Line to last point of Lower Line (Reverse)
+                    for (let i = points.length - 1; i >= 0; i--) {
+                        const p = points[i];
+                        ctx.lineTo(p.x, p.yLower);
+                    }
+
+                    // 4. Close the path
+                    ctx.closePath();
+
+                    ctx.fillStyle = fillColor;
+                    ctx.fill();
+
+                    ctx.restore();
+                });
+            }
+        }
+
+        class BollingerBandFillPaneView {
+            constructor(source) {
+                this._source = source;
+                this._renderer = new BollingerBandFillPaneRenderer();
+            }
+
+            renderer() {
+                return this._renderer;
+            }
+        }
+
+        class BollingerBandFillPrimitive {
+            constructor(upperSeries, lowerSeries, fillColor) {
+                this._upper = upperSeries;
+                this._lower = lowerSeries;
+                this._fillColor = fillColor;
+                this._paneViews = [new BollingerBandFillPaneView(this)];
+
+                // Data Cache
+                this._data = { upper: [], lower: [] };
+            }
+
+            // Method to explicit set data (Robustness)
+            setData(upperData, lowerData) {
+                this._data.upper = upperData;
+                this._data.lower = lowerData;
+                this._update();
+            }
+
+            paneViews() {
+                return this._paneViews;
+            }
+
+            attached(param) {
+                this._chart = param.chart;
+                this._requestUpdate = param.requestUpdate;
+                this._update();
+            }
+
+            detached() {
+                this._chart = null;
+                this._requestUpdate = null;
+            }
+
+            updateAllViews(param) {
+                // This method is called by the chart when interactions happen (scroll/zoom)
+                // We use this to recalculate viewport points
+                this._update();
+            }
+
+            zOrder() {
+                return 'bottom';
+            }
+
+            _update() {
+                if (!this._chart || !this._requestUpdate) return;
+
+                const timeScale = this._chart.timeScale();
+
+                if (!timeScale) return;
+
+                // Map logic
+                const upperData = this._data.upper;
+                const lowerData = this._data.lower;
+
+                if (upperData.length === 0 || lowerData.length === 0) return;
+
+                // Create a Time-Map for fast lookup of lower values
+                const lowerMap = new Map();
+                lowerData.forEach(d => lowerMap.set(d.time, d.value));
+
+                const points = [];
+
+                // Determine visible range (optimization) - skipping for simplicity in this sample
+                // Iterate all data (for small datasets like 100 points, this is fine)
+
+                for (let i = 0; i < upperData.length; i++) {
+                    const u = upperData[i];
+                    const lVal = lowerMap.get(u.time);
+
+                    if (lVal === undefined) continue;
+
+                    const x = timeScale.timeToCoordinate(u.time);
+
+                    // Coordinates can be null if out of view, but we should include them for fill continuity 
+                    // if they are just off-screen. For strict implementation, we check valid.
+                    // However, standard LWC `timeToCoordinate` returns null if point is efficiently far.
+                    // We will check allow null x if we want lines to connect off screen, but 
+                    // for robustness lets filter only visible or valid coords for now.
+                    if (x === null) continue;
+
+                    // Use series.priceToCoordinate instead of priceScale.priceToCoordinate
+                    // This is the correct API usage for Series Primitives attached to a series
+                    const yUpper = this._upper.priceToCoordinate(u.value);
+                    const yLower = this._lower.priceToCoordinate(lVal);
+
+                    if (yUpper !== null && yLower !== null) {
+                        points.push({ x, yUpper, yLower });
+                    }
+                }
+
+                this._paneViews[0].renderer().setData({
+                    points: points,
+                    fillColor: this._fillColor
+                });
+
+                // Request full primitive update
+                this._requestUpdate();
+            }
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main Execution =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart');
+
+            try {
+                log('🚀 Bollinger Bands Reference 시작');
+
+                const ohlcData = generateMockOHLCV(100);
+                const bb = calculateBB(ohlcData);
+                log(`✓ Mock 데이터 및 볼린저 밴드 계산 완료`, 'success');
+
+                log(`Container Width: ${container.clientWidth}, Height: 600`);
+
+                if (container.clientWidth === 0) {
+                    log('⚠️ Warning: Container width is 0. Retrying in 100ms...', 'warn');
+                }
+
+                const chart = createChart(container, {
+                    layout: { background: { color: '#1a1a1a' }, textColor: '#DDD' },
+                    grid: { vertLines: { color: '#333' }, horzLines: { color: '#333' } },
+                    width: container.clientWidth || 800, // Fallback width
+                    height: 600,
+                });
+
+                // Auto Resize
+                window.addEventListener('resize', () => {
+                    chart.applyOptions({ width: container.clientWidth });
+                });
+
+                const candlestickSeries = chart.addSeries(CandlestickSeries);
+                candlestickSeries.setData(ohlcData);
+
+                // Volume Series
+                const volumeSeries = chart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '', // Overlay
+                });
+                volumeSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.8, bottom: 0 },
+                });
+                volumeSeries.setData(ohlcData.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+                log('✓ Volume 시리즈 추가', 'success');
+
+                // Expose for debugging
+                window.chart = chart;
+                window.candleSeries = candlestickSeries;
+
+                const basisSeries = chart.addSeries(LineSeries, { color: 'gray', lineWidth: 2, title: 'Basis' }); // Thicker line
+                basisSeries.setData(ohlcData.map((d, i) => ({ time: d.time, value: bb.basis[i] })).filter(d => !isNaN(d.value)));
+
+                const upperSeries = chart.addSeries(LineSeries, { color: '#2196F3', lineWidth: 2, title: 'Upper Band' });
+                const upperData = ohlcData.map((d, i) => ({ time: d.time, value: bb.upper[i] })).filter(d => !isNaN(d.value));
+                upperSeries.setData(upperData);
+
+                const lowerSeries = chart.addSeries(LineSeries, { color: '#2196F3', lineWidth: 2, title: 'Lower Band' });
+                const lowerData = ohlcData.map((d, i) => ({ time: d.time, value: bb.lower[i] })).filter(d => !isNaN(d.value));
+                lowerSeries.setData(lowerData);
+
+                // Fill (Custom Primitive)
+                // Using Dynamic Series Reference Pattern
+                const cloudPrimitive = new BollingerBandFillPrimitive(upperSeries, lowerSeries, 'rgba(33, 150, 243, 0.4)');
+
+                // Pass data explicitly since we cannot reliably access .data() from series API in JS
+                cloudPrimitive.setData(upperData, lowerData);
+
+                // Attach to one of the series (or candlestick)
+                upperSeries.attachPrimitive(cloudPrimitive);
+
+                setTimeout(() => {
+                    chart.timeScale().fitContent();
+
+                    // ===== Data Dump (Verification) =====
+                    window.referenceData = {
+                        ohlc: ohlcData,
+                        basis: bb.basis,
+                        upper: bb.upper,
+                        lower: bb.lower,
+                        stdDev: bb.stdDev
+                    };
+                    log('💾 window.referenceData에 검증 데이터 저장됨', 'info');
+
+                    log('=== ✅ 모든 렌더링 완료 ===', 'success');
+                }, 200);
+
+            } catch (err) {
+                log(`Critical Error: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+            height: 600px;
+            /* Matched height */
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            /* Matched height */
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    </style>
+</head>
+
+<body>
+    <h1>📊 Bollinger Bands Reference (Fill)</h1>
+    <div class="subtitle">Pine Script: bollinger.pine → Pure LWC TypeScript Implementation with Fill</div>
+
+    <div class="container">
+        <div id="chart"></div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>Basis (SMA20)</strong>: 회색 라인 (<code>lineWidth: 2</code>)</li>
+            <li><strong>Upper/Lower Band</strong>: 파란색 라인 (<code>lineWidth: 2</code>)</li>
+            <li><strong>Fill</strong>: 밴드 사이 영역 채우기 (<code>ISeriesPrimitive</code>)</li>
+            <li><strong>Transparency</strong>: 40% 투명도 (<code>rgba(33, 150, 243, 0.4)</code>) - 시인성 강화</li>
+            <li><strong>zOrder</strong>: <code>back</code> (캔들스틱 뒤에 렌더링)</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>브라우저 콘솔에서 <code>JSON.stringify(window.referenceData)</code> 실행</li>
+            <li>PineTS 컴파일 결과와 데이터 일치 여부 확인</li>
+            <li><strong>Fill 영역 확인</strong>: 상단/하단 밴드 사이에 파란색 반투명 영역이 표시되어야 함</li>
+            <li><strong>겹침 확인</strong>: Fill이 캔들을 가리지 않고 뒤쪽에 그려지는지 확인</li>
+        </ul>
+    </div>
+
+    
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Length</strong>: [범위: 5~200] 중심선(SMA) 계산 기간 (기본값: 20).</li>
+            <li><strong>Mult</strong>: [범위: 0.1~5.0] 표준편차 배수 (기본값: 2.0). 밴드 폭 결정.</li>
+            <li><strong>장점</strong>: 변동성 축소(Squeeze) 및 확장 시각화, 과매수/과매도 판단.</li>
+            <li><strong>사용법</strong>: 밴드 상단 터치 시 과매수, 하단 터치 시 과매도 가능성. 밴드 폭이 좁아지면 변동성 폭발 전조.</li>
+            <li><strong>추천 시간대</strong>: 전 시간대 활용 가능. 스캘핑(M1~M5) 및 스윙(H4) 모두 유효.</li>
+            <li><strong>비추천</strong>: 없음 (범용성 높음).</li>
+            <li><strong>시너지 지표</strong>: RSI(다이버전스), MACD, Keltner Channel(스퀴즈 포착).</li>
+        </ul>
+    
+    </div>
+
+    <div style="text-align: center; margin-bottom: 30px;">
+        <a href="../index.html" class="nav-button">⬅️ 샘플 목록으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

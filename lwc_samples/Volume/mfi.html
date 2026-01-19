@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Money Flow Index (MFI) Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 200) {
+            const now = 1704067200;
+            const data = [];
+            let price = 100;
+            for (let i = 0; i < bars; i++) {
+                const trend = Math.sin(i / 20) * 10;
+                const open = price + trend * 0.1 + (Math.random() - 0.5) * 4;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({ time: now + i * 86400, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ===== MFI Logic =====
+        function ta_mfi(data, period = 14) {
+            const mfi = [];
+
+            // 1. Calculate Typical Price & Raw Money Flow
+            // We need previous TP, so we start loop from 1
+            const tp = data.map(d => (d.high + d.low + d.close) / 3);
+            const rmf = data.map((d, i) => tp[i] * d.volume);
+
+            for (let i = 0; i < data.length; i++) {
+                if (i < period) {
+                    mfi.push({ time: data[i].time, value: NaN });
+                    continue;
+                }
+
+                let posMf = 0;
+                let negMf = 0;
+
+                // Sum over period
+                // Start from (i - period + 1) to i
+                for (let j = i - period + 1; j <= i; j++) {
+                    if (j <= 0) continue; // Need prev TP
+
+                    if (tp[j] > tp[j - 1]) {
+                        posMf += rmf[j];
+                    } else if (tp[j] < tp[j - 1]) {
+                        negMf += rmf[j];
+                    }
+                }
+
+                let mfiValue;
+                if (negMf === 0) {
+                    mfiValue = 100;
+                } else {
+                    const mr = posMf / negMf;
+                    mfiValue = 100 - (100 / (1 + mr));
+                }
+
+                mfi.push({ time: data[i].time, value: mfiValue });
+            }
+
+            return mfi;
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const mainContainer = document.getElementById('main-chart');
+            const mfiContainer = document.getElementById('mfi-chart');
+
+            try {
+                log('🚀 MFI Reference 시작');
+                const data = generateMockOHLCV(300);
+                log(`✓ ${data.length}개 바 생성 완료`, 'success');
+
+                // 1. Main Chart
+                const mainChart = createChart(mainContainer, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    width: mainContainer.clientWidth,
+                    height: 400,
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const candleSeries = mainChart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+                });
+                candleSeries.setData(data);
+                log('✓ Main Chart: Candlestick 시리즈 추가', 'success');
+
+                // Volume Series (Overlay)
+                const volumeSeries = mainChart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '',
+                });
+                volumeSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.8, bottom: 0 },
+                });
+                volumeSeries.setData(data.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+                log('✓ Main Chart: Volume 시리즈 추가 (Overlay)', 'success');
+
+                // 2. MFI Chart
+                const mfiChart = createChart(mfiContainer, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    width: mfiContainer.clientWidth,
+                    height: 200,
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const mfiSeries = mfiChart.addSeries(LineSeries, {
+                    color: '#9C27B0', // Purple
+                    lineWidth: 2,
+                    priceScaleId: 'right',
+                    title: 'MFI 14'
+                });
+
+                const mfiData = ta_mfi(data, 14);
+                mfiSeries.setData(mfiData);
+                log('✓ MFI Chart: MFI(14) 시리즈 추가', 'success');
+
+                // 3. Levels (20/80)
+                mfiSeries.createPriceLine({
+                    price: 20,
+                    color: '#26a69a',
+                    lineWidth: 1,
+                    lineStyle: 2,
+                    axisLabelVisible: true,
+                    title: '20'
+                });
+                mfiSeries.createPriceLine({
+                    price: 80,
+                    color: '#ef5350',
+                    lineWidth: 1,
+                    lineStyle: 2,
+                    axisLabelVisible: true,
+                    title: '80'
+                });
+                log('✓ MFI Levels (20/80) 추가', 'info');
+
+                // 4. Sync TimeScales
+                const mainTimeScale = mainChart.timeScale();
+                const mfiTimeScale = mfiChart.timeScale();
+
+                mainTimeScale.subscribeVisibleLogicalRangeChange(range => {
+                    mfiTimeScale.setVisibleLogicalRange(range);
+                });
+
+                mfiTimeScale.subscribeVisibleLogicalRangeChange(range => {
+                    mainTimeScale.setVisibleLogicalRange(range);
+                });
+                log('✓ 두 차트의 TimeScale 동기화 완료', 'success');
+
+
+                setTimeout(() => {
+                    mainChart.timeScale().fitContent();
+                    log('✓ 차트 뷰포트 자동 조정 완료', 'success');
+                }, 100);
+
+                // Auto Resize
+                window.addEventListener('resize', () => {
+                    mainChart.applyOptions({ width: mainContainer.clientWidth });
+                    mfiChart.applyOptions({ width: mfiContainer.clientWidth });
+                });
+
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        .charts-column {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        #main-chart,
+        #mfi-chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 610px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    </style>
+</head>
+
+<body>
+    <h1>📊 Money Flow Index Reference</h1>
+    <div class="subtitle">Pine Script: mfi.pine → Pure LWC TypeScript Implementation (Dual Chart Layout)</div>
+
+    <div class="container">
+        <div class="charts-column">
+            <div id="main-chart"></div>
+            <div id="mfi-chart"></div>
+        </div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>Calculation</strong>: RSI applied to Volume-Weighted Price (MFI)</li>
+            <li><strong>Sub-Chart Layout</strong>: 메인 가격 차트와 별도의 MFI 차트 분리</li>
+            <li><strong>Levels</strong>: 20 (과매수) / 80 (과매도) 라인 표시</li>
+            <li><strong>Synchronization</strong>: 두 차트의 TimeScale(줌/팬) 동기화</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>스크롤/줌 시 상하단 차트가 같이 움직이는지 확인</li>
+            <li>MFI 값이 0~100 범위 내에서 움직이는지 확인</li>
+        </ul>
+    </div>
+
+    
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Length</strong>: [범위: 1+] 기간 (기본값: 14).</li>
+            <li><strong>장점</strong>: '거래량이 실린 RSI'. 가격 움직임의 신뢰도 판단.</li>
+            <li><strong>사용법</strong>: 80 이상 과매수, 20 이하 과매도. 다이버전스 발생 시 추세 반전 신호.</li>
+            <li><strong>추천 시간대</strong>: 1시간봉 이상. RSI 보다 선행하는 경향.</li>
+            <li><strong>비추천</strong>: 거래량 없는 차트.</li>
+            <li><strong>시너지 지표</strong>: RSI(비교 분석).</li>
+        </ul>
+    
+    </div>
+
+    <div style="text-align: center; margin-bottom: 30px;">
+        <a href="../index.html" class="nav-button">⬅️ 샘플 목록으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

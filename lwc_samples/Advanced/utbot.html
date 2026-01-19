@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UT Bot Alert Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 200) {
+            const now = 1704067200;
+            const data = [];
+            let price = 100;
+            for (let i = 0; i < bars; i++) {
+                const trend = Math.sin(i / 15) * 10;
+                const open = price + trend * 0.1 + (Math.random() - 0.5) * 4;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({ time: now + i * 86400, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ===== UT Bot Logic =====
+        function ta_ut_bot(data, a = 1, period = 10) {
+            // a = Key Value (Sensitivity), period = ATR Period
+            const result = [];
+            const trs = [];
+
+            // TR Calculation
+            for (let i = 0; i < data.length; i++) {
+                if (i === 0) {
+                    trs.push(data[i].high - data[i].low);
+                    continue;
+                }
+                const h = data[i].high;
+                const l = data[i].low;
+                const c_prev = data[i - 1].close;
+
+                const tr = Math.max(h - l, Math.abs(h - c_prev), Math.abs(l - c_prev));
+                trs.push(tr);
+            }
+
+            // ATR Calculation (SMA of TR)
+            const atrs = [];
+            let sum = 0;
+            for (let i = 0; i < trs.length; i++) {
+                sum += trs[i];
+                if (i >= period) sum -= trs[i - period];
+
+                if (i >= period - 1) {
+                    atrs[i] = sum / period;
+                } else {
+                    atrs[i] = NaN;
+                }
+            }
+
+            // UT Bot Logic
+            let xATRTrailingStop = 0;
+            let pos = 1; // 1: Long, -1: Short
+
+            for (let i = 0; i < data.length; i++) {
+                if (isNaN(atrs[i])) {
+                    result.push({ time: data[i].time, stop: NaN, position: 0, buy: false, sell: false });
+                    continue;
+                }
+
+                const src = data[i].close; // Use Close as Source
+                const nLoss = a * atrs[i];
+
+                let prevStop = (i > 0) ? result[i - 1].stop : 0;
+                if (isNaN(prevStop)) prevStop = src - nLoss; // Init
+
+                // Trailing Stop Logic
+                if (src > prevStop) {
+                    xATRTrailingStop = Math.max(prevStop, src - nLoss);
+                } else {
+                    xATRTrailingStop = Math.min(prevStop, src + nLoss);
+                }
+
+                // Position Logic
+                let currentPos = (i > 0) ? result[i - 1].position : 0;
+
+                // Simple Crossover for Direction Change (Original Script is more complex with limits)
+                // If Close > PrevStop -> Up
+                // If Close < PrevStop -> Down
+
+                // Refined Logic based on typical UT Bot implementation:
+                /* 
+                   xATRTrailingStop := if src > nz(xATRTrailingStop[1], 0) and src[1] > nz(xATRTrailingStop[1], 0)
+                       math.max(nz(xATRTrailingStop[1]), src - nLoss)
+                   else if src < nz(xATRTrailingStop[1], 0) and src[1] < nz(xATRTrailingStop[1], 0)
+                       math.min(nz(xATRTrailingStop[1]), src + nLoss)
+                   else if src > nz(xATRTrailingStop[1], 0)
+                       src - nLoss
+                   else 
+                       src + nLoss
+                */
+
+                // Let's implement refined logic properly
+                const prevXATR = (i > 0) ? result[i - 1].xATR : 0;
+                const prevSrc = (i > 0) ? data[i - 1].close : src;
+
+                let refinedStop = 0;
+                if (src > prevXATR && prevSrc > prevXATR) {
+                    refinedStop = Math.max(prevXATR, src - nLoss);
+                } else if (src < prevXATR && prevSrc < prevXATR) {
+                    refinedStop = Math.min(prevXATR, src + nLoss);
+                } else if (src > prevXATR) {
+                    refinedStop = src - nLoss;
+                } else {
+                    refinedStop = src + nLoss;
+                }
+
+                // Buy/Sell
+                /*
+                    ema = ta.ema(src, 1) // Just valid src
+                    above = ta.crossover(ema, xATRTrailingStop)
+                    below = ta.crossunder(ema, xATRTrailingStop)
+                    
+                    buy = src > xATRTrailingStop and above 
+                    sell = src < xATRTrailingStop and below
+                */
+
+                const isBuy = (src > refinedStop) && (prevSrc <= prevXATR);
+                const isSell = (src < refinedStop) && (prevSrc >= prevXATR);
+
+                result.push({
+                    time: data[i].time,
+                    xATR: refinedStop,
+                    stop: refinedStop,
+                    buy: isBuy,
+                    sell: isSell
+                });
+            }
+
+            return result;
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const mainContainer = document.getElementById('main-chart');
+
+            try {
+                log('🚀 UT Bot Alert Reference 시작');
+                const data = generateMockOHLCV(300);
+                log(`✓ ${data.length}개 바 생성 완료`, 'success');
+
+                // 1. Main Chart
+                const mainChart = createChart(mainContainer, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    width: mainContainer.clientWidth,
+                    height: 500,
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const candleSeries = mainChart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+                });
+                candleSeries.setData(data);
+                log('✓ Main Chart: Candlestick 시리즈 추가', 'success');
+
+                // Volume Series (Overlay)
+                const volumeSeries = mainChart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '',
+                });
+                volumeSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.8, bottom: 0 },
+                });
+                volumeSeries.setData(data.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+                log('✓ Main Chart: Volume 시리즈 추가 (Overlay)', 'success');
+
+                // 2. UT Bot Series
+                const utBotSeries = mainChart.addSeries(LineSeries, {
+                    color: '#2196F3', // Default
+                    lineWidth: 2,
+                    title: 'UT Bot Trail'
+                });
+
+                const utRes = ta_ut_bot(data, 2, 10); // Key=2, Period=10
+
+                // We'll color the line using `box` or simply update line color segments?
+                // LineSeries doesn't support multi-color segments easily.
+                // We can use 2 LineSeries (one Green, one Red) with NaNs, or just Single color.
+                // Or better: Use Markers for Buy/Sell and just one line color (Blue/Gray).
+                // Or use `palette` if we used primitive, but here LineSeries.
+                // Let's stick to Blue line + Markers.
+
+                utBotSeries.setData(utRes.map(r => ({ time: r.time, value: r.stop })));
+                log('✓ UT Bot Trailing Stop Line 추가', 'success');
+
+                // 3. Markers
+                const markers = [];
+                utRes.forEach(r => {
+                    if (r.buy) {
+                        markers.push({
+                            time: r.time,
+                            position: 'belowBar',
+                            color: '#4CAF50',
+                            shape: 'arrowUp',
+                            text: 'BUY'
+                        });
+                    }
+                    if (r.sell) {
+                        markers.push({
+                            time: r.time,
+                            position: 'aboveBar',
+                            color: '#e91e63',
+                            shape: 'arrowDown',
+                            text: 'SELL'
+                        });
+                    }
+                });
+                candleSeries.setMarkers(markers);
+                log(`✓ ${markers.length}개 Buy/Sell 마커 추가`, 'success');
+
+
+                setTimeout(() => {
+                    mainChart.timeScale().fitContent();
+                    log('✓ 차트 뷰포트 자동 조정 완료', 'success');
+                }, 100);
+
+                // Auto Resize
+                window.addEventListener('resize', () => {
+                    mainChart.applyOptions({ width: mainContainer.clientWidth });
+                });
+
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        .charts-column {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        #main-chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 500px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    </style>
+</head>
+
+<body>
+    <h1>📊 UT Bot Alert Reference</h1>
+    <div class="subtitle">Pine Script: ut_bot.pine → Pure LWC TypeScript Implementation (Trailing Stop + Markers)</div>
+
+    <div class="container">
+        <div class="charts-column">
+            <div id="main-chart"></div>
+        </div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>Calculation</strong>: ATR Trailing Stop (Key=2, Period=10)</li>
+            <li><strong>Visualization</strong>: Trailing Stop Line (Blue), Buy/Sell Markers</li>
+            <li><strong>Constraint</strong>: Crossover Logic based on Price and Trailing Stop</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>가격이 Trailing Stop을 상향 돌파할 때 BUY 마커 확인</li>
+            <li>가격이 Trailing Stop을 하향 돌파할 때 SELL 마커 확인</li>
+        </ul>
+    </div>
+
+    
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Sensitivity</strong>: [범위: 1+] 민감도 (기본값: 1). 신호 빈도 조절.</li>
+            <li><strong>ATR Period</strong>: [범위: 1+] (기본값: 10). 스탑로스 라인 계산용.</li>
+            <li><strong>장점</strong>: 트레일링 스탑 기능이 내장된 추세 추종 전략.</li>
+            <li><strong>사용법</strong>: Buy 신호(Green) 발생 시 매수, Sell 신호(Red) 발생 시 매도/청산.</li>
+            <li><strong>추천 시간대</strong>: 15분봉 이상. 크립토/주식 스윙.</li>
+            <li><strong>비추천</strong>: 1분봉 횡보.</li>
+            <li><strong>시너지 지표</strong>: Key Level(지지/저항) 확인 후 신호 진입.</li>
+        </ul>
+    
+    </div>
+
+    <div style="text-align: center; margin-bottom: 30px;">
+        <a href="../index.html" class="nav-button">⬅️ 샘플 목록으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

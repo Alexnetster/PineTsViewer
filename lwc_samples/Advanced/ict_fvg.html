@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ICT Fair Value Gaps (FVG) Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== ATR Calculator =====
+        function calculateATR(data, period = 14) {
+            const tr = [];
+            for (let i = 0; i < data.length; i++) {
+                if (i === 0) {
+                    tr.push(data[i].high - data[i].low);
+                } else {
+                    const high = data[i].high;
+                    const low = data[i].low;
+                    const prevClose = data[i - 1].close;
+                    tr.push(Math.max(
+                        high - low,
+                        Math.abs(high - prevClose),
+                        Math.abs(low - prevClose)
+                    ));
+                }
+            }
+
+            // Simple Moving Average of TR
+            const atr = [];
+            for (let i = 0; i < tr.length; i++) {
+                if (i < period - 1) {
+                    atr.push(NaN);
+                } else {
+                    let sum = 0;
+                    for (let j = 0; j < period; j++) {
+                        sum += tr[i - j];
+                    }
+                    atr.push(sum / period);
+                }
+            }
+            return atr;
+        }
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 200) {
+            const now = 1704067200;
+            const data = [];
+            let price = 100;
+
+            for (let i = 0; i < bars; i++) {
+                const time = now + i * 86400;
+
+                // Inject FVG Pattern every 25 bars
+                if (i > 10 && i % 25 === 0) {
+                    // C1
+                    data.push({ time, open: price, high: price + 2.5, low: price - 0.5, close: price + 2, volume: 500 });
+                    price += 2;
+
+                    // C2 - Big pump
+                    data.push({ time: time + 86400, open: price, high: price + 9, low: price - 0.5, close: price + 8, volume: 2000 });
+                    price += 8;
+                    i++;
+
+                    // C3 - Gap remains (low > C1 high)
+                    data.push({ time: time + 86400 * 2, open: price, high: price + 3, low: price - 1 + 2, close: price + 2, volume: 800 });
+                    price += 2;
+                    i++;
+                    continue;
+                }
+                else if (i > 10 && i % 35 === 0) {
+                    // Bearish FVG
+                    data.push({ time, open: price, high: price + 0.5, low: price - 2.5, close: price - 2, volume: 500 });
+                    price -= 2;
+
+                    data.push({ time: time + 86400, open: price, high: price + 0.5, low: price - 9, close: price - 8, volume: 2000 });
+                    price -= 8;
+                    i++;
+
+                    data.push({ time: time + 86400 * 2, open: price, high: price + 1 - 4, low: price - 3, close: price - 2, volume: 800 });
+                    price -= 2;
+                    i++;
+                    continue;
+                }
+
+                const trend = Math.sin(i / 20) * 10;
+                const open = price + trend * 0.05 + (Math.random() - 0.5) * 2;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+
+                data.push({ time, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ===== ICT FVG Logic with Mitigation & Filtering =====
+        function ta_ict_fvg(data, atr, minGapMultiplier = 0.5, maxBoxes = 10) {
+            const fvgs = [];
+
+            for (let i = 2; i < data.length; i++) {
+                const c1 = data[i - 2];
+                const c3 = data[i];
+                const currentATR = atr[i];
+
+                // Skip if ATR not available
+                if (isNaN(currentATR)) continue;
+
+                // Bullish FVG
+                if (c3.low > c1.high) {
+                    const gapSize = c3.low - c1.high;
+
+                    // Filter: Minimum gap size (ATR-based)
+                    if (gapSize >= currentATR * minGapMultiplier) {
+                        fvgs.push({
+                            type: 'bullish',
+                            top: c3.low,
+                            bottom: c1.high,
+                            startTime: c1.time,
+                            endTime: data[data.length - 1].time + 86400 * 10,
+                            createIndex: i,
+                            isMitigated: false
+                        });
+                    }
+                }
+
+                // Bearish FVG
+                if (c3.high < c1.low) {
+                    const gapSize = c1.low - c3.high;
+
+                    // Filter: Minimum gap size (ATR-based)
+                    if (gapSize >= currentATR * minGapMultiplier) {
+                        fvgs.push({
+                            type: 'bearish',
+                            top: c1.low,
+                            bottom: c3.high,
+                            startTime: c1.time,
+                            endTime: data[data.length - 1].time + 86400 * 10,
+                            createIndex: i,
+                            isMitigated: false
+                        });
+                    }
+                }
+            }
+
+            // Mitigation Check: Remove FVGs that have been filled
+            for (let fvg of fvgs) {
+                for (let i = fvg.createIndex + 1; i < data.length; i++) {
+                    const bar = data[i];
+
+                    if (fvg.type === 'bullish') {
+                        // Bullish FVG mitigated if price closes below top (enters gap)
+                        if (bar.close < fvg.top) {
+                            fvg.isMitigated = true;
+                            break;
+                        }
+                    } else {
+                        // Bearish FVG mitigated if price closes above bottom (enters gap)
+                        if (bar.close > fvg.bottom) {
+                            fvg.isMitigated = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Filter out mitigated FVGs
+            const activeFVGs = fvgs.filter(fvg => !fvg.isMitigated);
+
+            // Return only the most recent N active FVGs
+            return activeFVGs.slice(-maxBoxes);
+        }
+
+        // ===== FVG Box Primitive =====
+
+        class FVGRenderer {
+            constructor() {
+                this._data = null;
+            }
+
+            setData(data) {
+                this._data = data;
+            }
+
+            draw(target) {
+                if (!this._data || this._data.boxes.length === 0) return;
+
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const boxes = this._data.boxes;
+                    const horizontalPixelRatio = scope.horizontalPixelRatio;
+                    const verticalPixelRatio = scope.verticalPixelRatio;
+
+                    ctx.save();
+                    ctx.scale(horizontalPixelRatio, verticalPixelRatio);
+
+                    for (const box of boxes) {
+                        if (!box.x1 || !box.x2 || !box.yTop || !box.yBottom) continue;
+
+                        const width = box.x2 - box.x1;
+                        const height = box.yBottom - box.yTop;
+
+                        if (box.type === 'bullish') {
+                            ctx.fillStyle = 'rgba(0, 255, 136, 0.15)';
+                            ctx.strokeStyle = 'rgba(0, 255, 136, 0.4)';
+                        } else {
+                            ctx.fillStyle = 'rgba(255, 82, 82, 0.15)';
+                            ctx.strokeStyle = 'rgba(255, 82, 82, 0.4)';
+                        }
+
+                        ctx.lineWidth = 1;
+                        ctx.fillRect(box.x1, box.yTop, width, height);
+                        ctx.strokeRect(box.x1, box.yTop, width, height);
+                    }
+
+                    ctx.restore();
+                });
+            }
+        }
+
+        class FVGPaneView {
+            constructor(source) {
+                this._source = source;
+                this._renderer = new FVGRenderer();
+            }
+
+            renderer() {
+                return this._renderer;
+            }
+
+            zOrder() {
+                return 'bottom';
+            }
+        }
+
+        class FVGPrimitive {
+            constructor(fvgData) {
+                this._fvgData = fvgData;
+                this._paneView = new FVGPaneView(this);
+                this._paneViews = [this._paneView];
+                this._chart = null;
+                this._series = null;
+            }
+
+            paneViews() {
+                return this._paneViews;
+            }
+
+            attached(param) {
+                this._chart = param.chart;
+                this._series = param.series;
+                this._requestUpdate = param.requestUpdate;
+                this._update();
+            }
+
+            detached() {
+                this._chart = null;
+                this._series = null;
+                this._requestUpdate = null;
+            }
+
+            updateAllViews() {
+                this._update();
+            }
+
+            _update() {
+                if (!this._chart || !this._series) return;
+
+                const timeScale = this._chart.timeScale();
+                const visibleRange = timeScale.getVisibleRange();
+
+                if (!visibleRange) return;
+
+                const boxes = [];
+
+                for (const fvg of this._fvgData) {
+                    // Skip if completely out of view
+                    if (fvg.endTime < visibleRange.from || fvg.startTime > visibleRange.to) {
+                        continue;
+                    }
+
+                    let x1 = timeScale.timeToCoordinate(fvg.startTime);
+                    let x2 = timeScale.timeToCoordinate(fvg.endTime);
+
+                    // Handle off-screen coordinates
+                    if (x1 === null) x1 = -1000;
+                    if (x2 === null) x2 = 10000;
+
+                    const yTop = this._series.priceToCoordinate(fvg.top);
+                    const yBottom = this._series.priceToCoordinate(fvg.bottom);
+
+                    if (yTop === null || yBottom === null) continue;
+
+                    boxes.push({
+                        type: fvg.type,
+                        x1,
+                        x2,
+                        yTop,
+                        yBottom
+                    });
+                }
+
+                this._paneView._renderer.setData({ boxes });
+                if (this._requestUpdate) this._requestUpdate();
+            }
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const mainContainer = document.getElementById('main-chart');
+
+            try {
+                log('🚀 ICT FVG Reference 시작 (Mitigation + ATR Filter)');
+                const data = generateMockOHLCV(300);
+                log(`✓ ${data.length}개 바 생성 완료`, 'success');
+
+                // Calculate ATR
+                const atr = calculateATR(data, 14);
+                log('✓ ATR(14) 계산 완료', 'success');
+
+                const mainChart = createChart(mainContainer, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    width: mainContainer.clientWidth,
+                    height: 500,
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const candleSeries = mainChart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+                });
+                candleSeries.setData(data);
+                log('✓ Main Chart: Candlestick 시리즈 추가', 'success');
+
+                const volumeSeries = mainChart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '',
+                });
+                volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+                volumeSeries.setData(data.map(d => ({ time: d.time, value: d.volume, color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)' })));
+                log('✓ Volume 시리즈 추가', 'success');
+
+                // ICT FVG with Mitigation
+                const minGapMultiplier = 0.5; // Gap must be >= 0.5 * ATR
+                const maxBoxes = 10;
+                const fvgs = ta_ict_fvg(data, atr, minGapMultiplier, maxBoxes);
+                log(`✓ ${fvgs.length}개 Active FVG (Mitigation 적용, ATR Filter)`, 'info');
+
+                if (fvgs.length > 0) {
+                    const fvgPrimitive = new FVGPrimitive(fvgs);
+                    candleSeries.attachPrimitive(fvgPrimitive);
+                    log('✓ FVG Box Primitive 연결 완료', 'success');
+                } else {
+                    log('⚠️ 감지된 Active FVG가 없습니다.', 'warning');
+                }
+
+                setTimeout(() => {
+                    mainChart.timeScale().fitContent();
+                    log('✓ 차트 뷰포트 자동 조정 완료', 'success');
+                }, 100);
+
+                window.addEventListener('resize', () => {
+                    mainChart.applyOptions({ width: mainContainer.clientWidth });
+                });
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        .charts-column {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        #main-chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 500px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .log-warning {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    </style>
+</head>
+
+<body>
+    <h1>📊 ICT Fair Value Gaps (FVG) Reference</h1>
+    <div class="subtitle">Pine Script: ict_fvg.pine → Custom LWC Box Primitive (Mitigation + ATR Filter)</div>
+
+    <div class="container">
+        <div class="charts-column">
+            <div id="main-chart"></div>
+        </div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>Pattern</strong>: 3-Candle Structure with Gap</li>
+            <li><strong>Bullish FVG</strong>: Low(C3) > High(C1) (Green Zone)</li>
+            <li><strong>Bearish FVG</strong>: High(C3) < Low(C1) (Red Zone)</li>
+            <li><strong>Mitigation</strong>: 가격이 갭을 메우면 자동 제거</li>
+            <li><strong>ATR Filter</strong>: Gap Size >= 0.5 * ATR(14)</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 필터링 로직</h2>
+        <ul>
+            <li><strong>Mitigation Check</strong>: Bullish FVG는 Close < Top 시, Bearish FVG는 Close> Bottom 시 제거</li>
+            <li><strong>Minimum Gap Size</strong>: ATR 기반 필터로 노이즈 제거</li>
+            <li><strong>Max Boxes</strong>: 최근 10개 Active FVG만 표시</li>
+        </ul>
+    </div>
+
+    
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Threshold</strong>: [범위: 0.1+] 갭의 최소 크기 (ATR 배수 등).</li>
+            <li><strong>장점</strong>: 급격한 가격 이동으로 인해 체결되지 않은 주문이 남은 구간(Fair Value Gap) 식별.</li>
+            <li><strong>사용법</strong>: 가격은 FVG를 메우러 돌아오는 경향이 있음. FVG 구간에서 지지/저항 확인.</li>
+            <li><strong>추천 시간대</strong>: 1시간봉, 15분봉. ICT 매매기법의 핵심.</li>
+            <li><strong>비추천</strong>: 거래량 없는 시간대.</li>
+            <li><strong>시너지 지표</strong>: Liquidity Sweep, Order Block.</li>
+        </ul>
+    
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>브라우저 콘솔에서 <code>JSON.stringify(window.referenceData)</code> 확인.</li>
+            <li>차트 렌더링 상태 시각적 점검.</li>
+        </ul>
+    </div>
+
+    <div style="text-align: center; margin-bottom: 30px;">
+        <a href="../index.html" class="nav-button">⬅️ 샘플 목록으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

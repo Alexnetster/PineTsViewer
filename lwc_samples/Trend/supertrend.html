@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SuperTrend Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 200) {
+            const now = 1704067200;
+            const data = [];
+            let price = 100;
+            for (let i = 0; i < bars; i++) {
+                const trend = Math.sin(i / 30) * 8;
+                const open = price + trend * 0.1 + (Math.random() - 0.5) * 4;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({ time: now + i * 86400, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ... (SuperTrend Logic) ...
+
+        // ... (Main) ...
+
+
+
+        // ===== SuperTrend Logic =====
+        function ta_supertrend(data, factor = 3, atrPeriod = 10) {
+            function tr(i) {
+                if (i === 0) return data[i].high - data[i].low;
+                const high = data[i].high;
+                const low = data[i].low;
+                const prevClose = data[i - 1].close;
+                return Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+            }
+
+            const trs = [];
+            for (let i = 0; i < data.length; i++) trs.push(tr(i));
+
+            let firstATR = 0;
+            for (let i = 0; i < atrPeriod; i++) firstATR += trs[i];
+            firstATR /= atrPeriod;
+
+            const atrAligned = new Array(data.length).fill(NaN);
+            let rma = firstATR;
+            atrAligned[atrPeriod - 1] = rma;
+            for (let i = atrPeriod; i < data.length; i++) {
+                rma = (trs[i] + (atrPeriod - 1) * rma) / atrPeriod;
+                atrAligned[i] = rma;
+            }
+
+            const result = [];
+            let trend = 1;
+            let upperBand = 0;
+            let lowerBand = 0;
+
+            for (let i = 0; i < data.length; i++) {
+                if (isNaN(atrAligned[i])) {
+                    result.push({ time: data[i].time, value: NaN, trend: 1 });
+                    continue;
+                }
+
+                const hl2 = (data[i].high + data[i].low) / 2;
+                const matr = factor * atrAligned[i];
+                let basicUpper = hl2 + matr;
+                let basicLower = hl2 - matr;
+
+                const prevUpper = (i > 0 && !isNaN(result[i - 1].value)) ? upperBand : basicUpper;
+                const prevLower = (i > 0 && !isNaN(result[i - 1].value)) ? lowerBand : basicLower;
+                const prevClose = (i > 0) ? data[i - 1].close : data[i].close;
+
+                if (basicUpper < prevUpper || prevClose > prevUpper) upperBand = basicUpper;
+                else upperBand = prevUpper;
+
+                if (basicLower > prevLower || prevClose < prevLower) lowerBand = basicLower;
+                else lowerBand = prevLower;
+
+                let dir = trend;
+                if (trend === 1 && data[i].close < lowerBand) dir = -1;
+                else if (trend === -1 && data[i].close > upperBand) dir = 1;
+                trend = dir;
+
+                result.push({
+                    time: data[i].time,
+                    value: trend === 1 ? lowerBand : upperBand,
+                    trend: trend
+                });
+            }
+            return result;
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart');
+            try {
+                log('🚀 SuperTrend 시작');
+                const data = generateMockOHLCV(300);
+                log(`✓ ${data.length}개 바 생성 완료`, 'success');
+
+                const chart = createChart(container, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    width: container.clientWidth,
+                    height: 600,
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const candleSeries = chart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+                });
+                candleSeries.setData(data);
+                log('✓ Candlestick 시리즈 추가', 'success');
+
+                // Volume Series
+                const volumeSeries = chart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '', // Overlay
+                });
+                volumeSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.8, bottom: 0 },
+                });
+                volumeSeries.setData(data.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+                log('✓ Volume 시리즈 추가', 'success');
+
+                const stData = ta_supertrend(data);
+                log('✓ SuperTrend 계산 완료', 'success');
+
+                // ===== SuperTrend Primitive (Multi-Color Line + Fill) =====
+                class SuperTrendFillRenderer {
+                    constructor() { this._data = null; }
+                    setData(data) { this._data = data; }
+                    draw(target) {
+                        if (!this._data || this._data.segments.length === 0) return;
+                        target.useBitmapCoordinateSpace(scope => {
+                            const ctx = scope.context;
+                            const segments = this._data.segments;
+                            const horizontalPixelRatio = scope.horizontalPixelRatio;
+                            const verticalPixelRatio = scope.verticalPixelRatio;
+
+                            ctx.save();
+                            ctx.scale(horizontalPixelRatio, verticalPixelRatio);
+
+                            for (const segment of segments) {
+                                if (segment.points.length < 2) continue;
+                                ctx.beginPath();
+                                const p0 = segment.points[0];
+                                ctx.moveTo(p0.x, p0.y);
+
+                                // Draw SuperTrend Line
+                                for (let i = 1; i < segment.points.length; i++) {
+                                    ctx.lineTo(segment.points[i].x, segment.points[i].y);
+                                }
+
+                                // Draw back to Price Line (Reverse)
+                                if (segment.pricePoints) {
+                                    for (let i = segment.pricePoints.length - 1; i >= 0; i--) {
+                                        ctx.lineTo(segment.pricePoints[i].x, segment.pricePoints[i].y);
+                                    }
+                                }
+
+                                ctx.closePath();
+                                ctx.fillStyle = segment.color === '#00E676'
+                                    ? 'rgba(0, 230, 118, 0.2)' // Green Fill
+                                    : 'rgba(255, 82, 82, 0.2)'; // Red Fill
+                                ctx.fill();
+                            }
+                            ctx.restore();
+                        });
+                    }
+                }
+
+                class SuperTrendLineRenderer {
+                    constructor() { this._data = null; }
+                    setData(data) { this._data = data; }
+                    draw(target) {
+                        if (!this._data || this._data.segments.length === 0) return;
+                        target.useBitmapCoordinateSpace(scope => {
+                            const ctx = scope.context;
+                            const segments = this._data.segments;
+                            const horizontalPixelRatio = scope.horizontalPixelRatio;
+                            const verticalPixelRatio = scope.verticalPixelRatio;
+
+                            ctx.save();
+                            ctx.scale(horizontalPixelRatio, verticalPixelRatio);
+                            ctx.lineWidth = 2;
+
+                            for (const segment of segments) {
+                                ctx.beginPath();
+                                const points = segment.points;
+                                if (points.length > 0) {
+                                    ctx.moveTo(points[0].x, points[0].y);
+                                    for (let i = 1; i < points.length; i++) {
+                                        ctx.lineTo(points[i].x, points[i].y);
+                                    }
+                                }
+                                ctx.strokeStyle = segment.color;
+                                ctx.stroke();
+                            }
+                            ctx.restore();
+                        });
+                    }
+                }
+
+                class SuperTrendFillPaneView {
+                    constructor(source) { this._source = source; this._renderer = new SuperTrendFillRenderer(); }
+                    renderer() { return this._renderer; }
+                    zOrder() { return 'bottom'; }
+                }
+
+                class SuperTrendLinePaneView {
+                    constructor(source) { this._source = source; this._renderer = new SuperTrendLineRenderer(); }
+                    renderer() { return this._renderer; }
+                    zOrder() { return 'top'; }
+                }
+
+                class SuperTrendPrimitive {
+                    constructor() {
+                        this._fillView = new SuperTrendFillPaneView(this);
+                        this._lineView = new SuperTrendLinePaneView(this);
+                        this._paneViews = [this._fillView, this._lineView];
+                        this._stData = [];
+                        this._ohlcData = [];
+                    }
+                    setData(stData, ohlcData) {
+                        this._stData = stData;
+                        this._ohlcData = ohlcData;
+                        this._update();
+                    }
+                    paneViews() { return this._paneViews; }
+                    attached(param) {
+                        this._chart = param.chart;
+                        this._series = param.series;
+                        this._requestUpdate = param.requestUpdate;
+                        this._update();
+                    }
+                    detached() {
+                        this._chart = null;
+                        this._series = null;
+                        this._requestUpdate = null;
+                    }
+                    updateAllViews(param) { this._update(); }
+
+                    _update() {
+                        if (!this._chart || !this._requestUpdate || !this._series) return;
+
+                        const timeScale = this._chart.timeScale();
+                        const data = this._stData;
+                        const ohlc = this._ohlcData;
+
+                        if (!data || data.length === 0) return;
+
+                        const segments = [];
+                        let currentSegment = null;
+
+                        const ohlcMap = new Map();
+                        if (ohlc) {
+                            ohlc.forEach(d => ohlcMap.set(d.time, d));
+                        }
+
+                        for (let i = 0; i < data.length; i++) {
+                            const item = data[i];
+                            if (item.value == null || isNaN(item.value)) continue;
+
+                            const x = timeScale.timeToCoordinate(item.time);
+                            if (x === null) continue;
+
+                            const stY = this._series.priceToCoordinate(item.value);
+                            if (stY === null) continue;
+
+                            let priceY = null;
+                            if (ohlc) {
+                                const bar = ohlcMap.get(item.time);
+                                if (bar) {
+                                    const targetPrice = item.trend === 1 ? bar.low : bar.high;
+                                    priceY = this._series.priceToCoordinate(targetPrice);
+                                }
+                            }
+
+                            const color = item.trend === 1 ? '#00E676' : '#FF5252';
+
+                            if (!currentSegment || currentSegment.color !== color) {
+                                currentSegment = { color: color, points: [], pricePoints: [] };
+                                segments.push(currentSegment);
+                            }
+                            currentSegment.points.push({ x, y: stY });
+                            if (priceY !== null) {
+                                currentSegment.pricePoints.push({ x, y: priceY });
+                            }
+                        }
+
+                        this._fillView.renderer().setData({ segments });
+                        this._lineView.renderer().setData({ segments });
+                        this._requestUpdate();
+                    }
+                }
+
+
+                // ... (Logic continues in Main)
+
+
+
+                // Create Primitive
+                const stPrimitive = new SuperTrendPrimitive();
+                stPrimitive.setData(stData, data);
+
+                // Attach to candlestick series
+                candleSeries.attachPrimitive(stPrimitive);
+
+                log(`✓ SuperTrend Primitive 적용 (Multi-Color Line + Fill)`, 'success');
+
+                setTimeout(() => {
+                    chart.timeScale().fitContent();
+                    log('✓ 차트 뷰포트 자동 조정 완료', 'success');
+                }, 100);
+
+                // ===== Data Dump (Verification) =====
+                window.referenceData = {
+                    ohlc: data,
+                    supertrend: stData
+                };
+                log('💾 window.referenceData에 검증 데이터 저장됨', 'info');
+                log('콘솔에서 JSON.stringify(window.referenceData) 실행 가능', 'info');
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+        
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+    </style>
+</head>
+
+<body>
+    <h1>📊 SuperTrend Reference</h1>
+    <div class="subtitle">Pine Script: supertrend.pine → Pure LWC TypeScript Implementation</div>
+
+    <div class="container">
+        <div id="chart"></div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>Trend Following</strong>: ATR 기반 변동성 고려</li>
+            <li><strong>Up Trend</strong>: 녹색 라인 (지지선), 가격 상승 시 함께 상승</li>
+            <li><strong>Down Trend</strong>: 빨간색 라인 (저항선), 가격 하락 시 함께 하락</li>
+            <li><strong>Trend Switch</strong>: 종가(Close)가 라인을 돌파할 때 추세 전환</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>브라우저 콘솔에서 <code>JSON.stringify(window.referenceData)</code> 실행</li>
+            <li>PineTS 컴파일 결과와 SuperTrend 계산 값 및 Trend Direction 비교</li>
+            <li>Up(Green)/Down(Red) 추세 변경 시점이 시각적으로 정확한지 확인</li>
+        </ul>
+    </div>
+
+    
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Factor</strong>: [범위: 1.0~10.0] ATR의 배수 (기본값: 3.0). 값이 클수록 추세 변화에 둔감하여 노이즈 제어에 유리.</li>
+            <li><strong>ATR Period</strong>: [범위: 1~100] 변동성 계산 기간 (기본값: 10). 값이 클수록 장기 변동성을 반영.</li>
+            <li><strong>장점</strong>: 명확한 진입/청산 신호 제공, 추세장 강점.</li>
+            <li><strong>사용법</strong>: 가격이 Green 라인 위에 있으면 매수 유지, Red 라인 아래면 매도 유지.</li>
+            <li><strong>추천 시간대</strong>: 1시간봉(H1), 4시간봉(H4), 일봉(D1). (추세는 긴 호흡에서 신뢰도 높음)</li>
+            <li><strong>비추천</strong>: 1분봉(M1) 등 초단기 차트. (횡보장에서 잦은 손실 발생)</li>
+            <li><strong>시너지 지표</strong>: ADX(추세 강도 확인), RSI(진입 타이밍).</li>
+        </ul>
+    
+    </div>
+
+    <div style="text-align: center; margin-bottom: 30px;">
+        <a href="../index.html" class="nav-button">⬅️ 샘플 목록으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

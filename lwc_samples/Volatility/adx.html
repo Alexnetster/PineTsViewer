@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ADX/DMI Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 200) {
+            const now = 1704067200;
+            const data = [];
+            let price = 100;
+            for (let i = 0; i < bars; i++) {
+                // Strong trend phase vs chop
+                const trend = Math.sin(i / 15) * 15;
+                const open = price + trend * 0.1 + (Math.random() - 0.5) * 3;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({ time: now + i * 86400, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ===== ADX/DMI Logic =====
+        function ta_dmi(data, len = 14, adxLen = 14) {
+            const trs = [];
+            const plusDM = [];
+            const minusDM = [];
+
+            // 1. Calculate TR, +DM, -DM
+            for (let i = 0; i < data.length; i++) {
+                const h = data[i].high;
+                const l = data[i].low;
+                let tr = h - l;
+                let up = 0; // +DM
+                let down = 0; // -DM
+
+                if (i > 0) {
+                    const prevC = data[i - 1].close;
+                    const prevH = data[i - 1].high;
+                    const prevL = data[i - 1].low;
+
+                    tr = Math.max(tr, Math.abs(h - prevC), Math.abs(l - prevC));
+
+                    const moveUp = h - prevH;
+                    const moveDown = prevL - l;
+
+                    if (moveUp > 0 && moveUp > moveDown) up = moveUp;
+                    if (moveDown > 0 && moveDown > moveUp) down = moveDown;
+                }
+                trs.push(tr);
+                plusDM.push(up);
+                minusDM.push(down);
+            }
+
+            // 2. Smooth (RMA) TR, +DM, -DM
+            // Robust RMA handling initial NaNs
+            function rma(src, length) {
+                const res = new Array(src.length).fill(NaN);
+                const alpha = 1 / length;
+
+                // Find first valid index
+                let firstValidIndex = -1;
+                for (let i = 0; i < src.length; i++) {
+                    if (!isNaN(src[i])) {
+                        firstValidIndex = i;
+                        break;
+                    }
+                }
+
+                // If not enough data
+                if (firstValidIndex === -1 || firstValidIndex + length > src.length) return res;
+
+                let sum = 0;
+                for (let i = firstValidIndex; i < firstValidIndex + length; i++) sum += src[i];
+                res[firstValidIndex + length - 1] = sum / length;
+
+                for (let i = firstValidIndex + length; i < src.length; i++) {
+                    if (isNaN(src[i])) {
+                        res[i] = NaN;
+                    } else {
+                        res[i] = alpha * src[i] + (1 - alpha) * res[i - 1];
+                    }
+                }
+                return res;
+            }
+
+            const trSmooth = rma(trs, len);
+            const plusDMSmooth = rma(plusDM, len);
+            const minusDMSmooth = rma(minusDM, len);
+
+            // 3. Calculate DI+, DI-
+            const plusDI = [];
+            const minusDI = [];
+            const dx = [];
+
+            for (let i = 0; i < data.length; i++) {
+                if (isNaN(trSmooth[i]) || trSmooth[i] === 0) {
+                    plusDI.push(NaN); minusDI.push(NaN); dx.push(NaN);
+                    continue;
+                }
+                const pdi = (plusDMSmooth[i] / trSmooth[i]) * 100;
+                const mdi = (minusDMSmooth[i] / trSmooth[i]) * 100;
+                plusDI.push(pdi);
+                minusDI.push(mdi);
+
+                const sum = pdi + mdi;
+                const diff = Math.abs(pdi - mdi);
+                const val = sum === 0 ? 0 : (diff / sum) * 100;
+                dx.push(val);
+            }
+
+            // 4. Calculate ADX (RMA of DX)
+            // ADX smoothing length often same as DI length
+            const adx = rma(dx, adxLen);
+
+            return {
+                pdi: plusDI.map((v, i) => ({ time: data[i].time, value: v })),
+                mdi: minusDI.map((v, i) => ({ time: data[i].time, value: v })),
+                adx: adx.map((v, i) => ({ time: data[i].time, value: v }))
+            };
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const mainContainer = document.getElementById('main-chart');
+            const dmiContainer = document.getElementById('dmi-chart');
+
+            try {
+                log('🚀 ADX/DMI Reference 시작');
+                const data = generateMockOHLCV(300);
+                log(`✓ ${data.length}개 바 생성 완료`, 'success');
+
+                // 1. Main Chart
+                const mainChart = createChart(mainContainer, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    width: mainContainer.clientWidth,
+                    height: 400,
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const candleSeries = mainChart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+                });
+                candleSeries.setData(data);
+                log('✓ Main Chart: Candlestick 시리즈 추가', 'success');
+
+                // Volume Series
+                const volumeSeries = mainChart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '',
+                });
+                volumeSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.8, bottom: 0 },
+                });
+                volumeSeries.setData(data.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+                log('✓ Main Chart: Volume 시리즈 추가 (Overlay)', 'success');
+
+                // 2. DMI Chart
+                const dmiChart = createChart(dmiContainer, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    width: dmiContainer.clientWidth,
+                    height: 200,
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const adxSeries = dmiChart.addSeries(LineSeries, { color: '#FF00FF', lineWidth: 2, title: 'ADX' });
+                const pdiSeries = dmiChart.addSeries(LineSeries, { color: '#26a69a', lineWidth: 1, title: '+DI' });
+                const mdiSeries = dmiChart.addSeries(LineSeries, { color: '#ef5350', lineWidth: 1, title: '-DI' });
+
+                const dmiData = ta_dmi(data, 14, 14);
+
+                adxSeries.setData(dmiData.adx.filter(d => !isNaN(d.value)));
+                pdiSeries.setData(dmiData.pdi.filter(d => !isNaN(d.value)));
+                mdiSeries.setData(dmiData.mdi.filter(d => !isNaN(d.value)));
+
+                log('✓ DMI Chart: ADX, +DI, -DI Series 추가', 'success');
+
+                // Add key level 20 or 25 for ADX
+                adxSeries.createPriceLine({ price: 25, color: '#666', lineStyle: 2, title: '25' });
+
+
+                // 3. Sync TimeScales
+                const mainTimeScale = mainChart.timeScale();
+                const dmiTimeScale = dmiChart.timeScale();
+
+                mainTimeScale.subscribeVisibleLogicalRangeChange(range => {
+                    dmiTimeScale.setVisibleLogicalRange(range);
+                });
+
+                dmiTimeScale.subscribeVisibleLogicalRangeChange(range => {
+                    mainTimeScale.setVisibleLogicalRange(range);
+                });
+                log('✓ 두 차트의 TimeScale 동기화 완료', 'success');
+
+
+                setTimeout(() => {
+                    mainChart.timeScale().fitContent();
+                    log('✓ 차트 뷰포트 자동 조정 완료', 'success');
+                }, 100);
+
+                // Auto Resize
+                window.addEventListener('resize', () => {
+                    mainChart.applyOptions({ width: mainContainer.clientWidth });
+                    dmiChart.applyOptions({ width: dmiContainer.clientWidth });
+                });
+
+
+                // ===== Data Dump (Verification) =====
+                window.referenceData = {
+                    ohlc: data,
+                    dmi: dmiData
+                };
+                log('💾 window.referenceData에 검증 데이터 저장됨', 'info');
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        .charts-column {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        #main-chart,
+        #dmi-chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 610px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>📊 ADX/DMI Reference</h1>
+    <div class="subtitle">Pine Script: adx.pine → Pure LWC TypeScript Implementation (Dual Chart Layout)</div>
+
+    <div class="container">
+        <div class="charts-column">
+            <div id="main-chart"></div>
+            <div id="dmi-chart"></div>
+        </div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>Logic</strong>: DMI(DI+, DI-) Calculation & ADX (Average Directional Index)</li>
+            <li><strong>Visual</strong>: 3 Lines (Pink ADX, Green +DI, Red -DI)</li>
+            <li><strong>Constraint</strong>: Using Wilder's RMA for smoothing</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>ADX가 25 이상일 때 추세가 강한지 확인</li>
+            <li>DI+와 DI-의 교차가 추세 방향과 일치하는지 확인</li>
+            <li><code>JSON.stringify(window.referenceData)</code>로 계산 값 검증</li>
+        </ul>
+    </div>
+
+
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>ADX Smoothing</strong>: [범위: 1+] ADX 스무딩 기간 (기본값: 14).</li>
+            <li><strong>DI Length</strong>: [범위: 1+] DI 계산 기간 (기본값: 14).</li>
+            <li><strong>장점</strong>: 추세의 '강도'를 측정하는 최고의 지표.</li>
+            <li><strong>사용법</strong>: ADX가 25 이상이면 강한 추세장. DI+가 DI-보다 위에 있으면 상승 추세.</li>
+            <li><strong>추천 시간대</strong>: 4시간봉, 일봉. 진짜 추세를 거르는 필터로 사용.</li>
+            <li><strong>비추천</strong>: 횡보장(ADX 20 이하일 때는 모든 추세 지표 무시).</li>
+            <li><strong>시너지 지표</strong>: SAR(ADX 강세일 때만 SAR 신호 따르기).</li>
+        </ul>
+
+    </div>
+
+    <div style="text-align: center; margin-bottom: 30px;">
+        <a href="../index.html" class="nav-button">⬅️ 샘플 목록으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

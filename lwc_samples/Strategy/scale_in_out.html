@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scale In/Out Strategy (Pyramiding)</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data =====
+        function generateTrendOHLCV(bars = 300) {
+            const now = Math.floor(Date.now() / 1000) - bars * 86400;
+            const data = [];
+            let price = 10000;
+            for (let i = 0; i < bars; i++) {
+                // Uptrend with noise
+                const trend = (i > 50) ? (i - 50) * 0.5 : 0; // Flat start, then up
+                const noise = (Math.random() - 0.5) * 50;
+
+                const open = price + trend * 0.1 + (Math.random() - 0.5) * 20;
+                const close = open + (Math.random() - 0.45) * 50; // Slight bullish bias
+                const high = Math.max(open, close) + Math.random() * 30;
+                const low = Math.min(open, close) - Math.random() * 30;
+
+                data.push({ time: now + i * 86400, open, high, low, close });
+                price = close;
+            }
+            return data;
+        }
+
+        // ===== App Logic =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart-container');
+            const data = generateTrendOHLCV(300);
+
+            // Chart Init
+            const chart = createChart(container, {
+                layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                width: container.clientWidth,
+                height: 500,
+                timeScale: { timeVisible: true, secondsVisible: false },
+                crosshair: { mode: 1 }
+            });
+
+            const candleSeries = chart.addSeries(CandlestickSeries);
+            candleSeries.setData(data);
+
+            // Lines & Markers
+            let avgPriceLine = null;
+            const markers = [];
+            let positions = []; // { price, size, id }
+
+            // UI Elements
+            const elTotalSize = document.getElementById('total-size');
+            const elAvgPrice = document.getElementById('avg-price');
+            const elUnrealizedPnL = document.getElementById('unrealized-pnl');
+            const elRealizedPnL = document.getElementById('realized-pnl');
+
+            let realizedPnL = 0;
+
+            function updateStats() {
+                const currentPrice = data[data.length - 1].close;
+
+                // Calc Total Size & Weighted Avg Price
+                let totalSize = 0;
+                let totalCost = 0;
+
+                positions.forEach(p => {
+                    totalSize += p.size;
+                    totalCost += p.price * p.size;
+                });
+
+                const avgPrice = totalSize > 0 ? (totalCost / totalSize) : 0;
+                const unrealizedPnL = totalSize > 0 ? (currentPrice - avgPrice) * totalSize : 0;
+
+                // Update UI
+                elTotalSize.textContent = totalSize;
+                elAvgPrice.textContent = avgPrice > 0 ? avgPrice.toFixed(2) : '--';
+
+                const pnlClass = unrealizedPnL >= 0 ? 'green' : 'red';
+                elUnrealizedPnL.innerHTML = `<span class="${pnlClass}">${unrealizedPnL.toFixed(2)}</span>`;
+
+                const realizedClass = realizedPnL >= 0 ? 'green' : 'red';
+                elRealizedPnL.innerHTML = `<span class="${realizedClass}">${realizedPnL.toFixed(2)}</span>`;
+
+                // Update Avg Price Line
+                if (avgPriceLine) {
+                    candleSeries.removePriceLine(avgPriceLine);
+                    avgPriceLine = null;
+                }
+
+                if (totalSize > 0) {
+                    avgPriceLine = candleSeries.createPriceLine({
+                        price: avgPrice,
+                        color: '#E040FB', // Purple
+                        lineWidth: 2,
+                        lineStyle: 0,
+                        axisLabelVisible: true,
+                        title: `AVG (${totalSize})`,
+                    });
+                }
+            }
+
+            // Actions
+            window.buy = (size) => {
+                const currentPrice = data[data.length - 1].close;
+                const time = data[data.length - 1].time;
+
+                positions.push({ price: currentPrice, size: size, id: Date.now() });
+
+                // Add Marker
+                markers.push({
+                    time: time,
+                    position: 'belowBar',
+                    color: '#2196F3',
+                    shape: 'arrowUp',
+                    text: `Buy ${size}`
+                });
+                candleSeries.setMarkers(markers);
+
+                updateStats();
+            };
+
+            window.sell = (ratio) => {
+                if (positions.length === 0) return;
+
+                const currentPrice = data[data.length - 1].close;
+                const time = data[data.length - 1].time;
+
+                // FIFO Logic or Average Logic? Usually average for PnL
+                // Simple Logic: Reduce total size, Realize PnL based on Avg Price
+
+                let totalSize = positions.reduce((sum, p) => sum + p.size, 0);
+                let totalCost = positions.reduce((sum, p) => sum + p.price * p.size, 0);
+                let avgPrice = totalCost / totalSize;
+
+                const sellSize = Math.floor(totalSize * ratio);
+                if (sellSize <= 0) return;
+
+                // Calculate Profit
+                const profit = (currentPrice - avgPrice) * sellSize;
+                realizedPnL += profit;
+
+                // Reduce Positions (Simplification: reducing from the pool)
+                // In reality, you match specific lots. Here we just reduce size proportionally.
+                // Re-construct positions... actually simple way:
+                // Just remove 'sellSize' from the total using AvgPrice as cost basis for remaining? 
+                // No, standard way: Avg Price doesn't change on Sell.
+
+                let remainingToSell = sellSize;
+                // Naive implementation: reduce from first position (FIFO)
+                /*
+                for (let i = 0; i < positions.length; i++) {
+                    if (remainingToSell <= 0) break;
+                    if (positions[i].size > remainingToSell) {
+                        positions[i].size -= remainingToSell;
+                        remainingToSell = 0;
+                    } else {
+                        remainingToSell -= positions[i].size;
+                        positions[i].size = 0;
+                    }
+                }
+                positions = positions.filter(p => p.size > 0);
+                */
+                // Easier implementation for Visualizer: Just keep one "virtual" position block if we only care about Avg Price
+
+                // Correct FIFO for PnL tracking generally, but for "AvgPrice line invariance", 
+                // we just need to remove quantity.
+                // However, to keep it simple and show visualization:
+
+                // Let's actually remove from the array to allow valid avg price recalc if we add later
+                for (let i = 0; i < positions.length; i++) {
+                    if (remainingToSell <= 0) break;
+                    let p = positions[i];
+                    if (p.size <= remainingToSell) {
+                        remainingToSell -= p.size;
+                        p.size = 0;
+                    } else {
+                        p.size -= remainingToSell;
+                        remainingToSell = 0;
+                    }
+                }
+                positions = positions.filter(p => p.size > 0);
+
+
+                // Add Marker
+                markers.push({
+                    time: time,
+                    position: 'aboveBar',
+                    color: '#E91E63',
+                    shape: 'arrowDown',
+                    text: `Sell ${sellSize} (${ratio * 100}%)`
+                });
+                candleSeries.setMarkers(markers);
+
+                updateStats();
+            };
+
+            // Resize
+            window.addEventListener('resize', () => {
+                chart.applyOptions({ width: container.clientWidth });
+            });
+
+            // Initial Stat
+            updateStats();
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+            display: flex;
+            height: 100vh;
+            gap: 20px;
+        }
+
+        .main-col {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar {
+            width: 320px;
+            background: #1a1a1a;
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        #chart-container {
+            flex: 1;
+            border: 1px solid #333;
+            border-radius: 8px;
+            background: #151515;
+            position: relative;
+        }
+
+        h1 {
+            color: #E040FB;
+            font-size: 20px;
+            margin-bottom: 5px;
+        }
+
+        .subtitle {
+            color: #888;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+
+        .control-group {
+            background: #252525;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .control-group h3 {
+            font-size: 14px;
+            color: #bbb;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 4px;
+            color: #fff;
+            font-weight: bold;
+            cursor: pointer;
+            flex: 1;
+            font-size: 12px;
+        }
+
+        .btn-buy {
+            background: #2196F3;
+        }
+
+        .btn-buy:hover {
+            background: #1E88E5;
+        }
+
+        .btn-sell {
+            background: #EF5350;
+        }
+
+        .btn-sell:hover {
+            background: #E53935;
+        }
+
+        .result-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .result-val {
+            font-weight: bold;
+            color: #fff;
+        }
+
+        .highlight {
+            color: #E040FB;
+        }
+
+        .green {
+            color: #00E676;
+        }
+
+        .red {
+            color: #EF5350;
+        }
+
+        .guide-text {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.4;
+            margin-top: auto;
+        }
+
+        .btn-back {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            text-align: center;
+            background: #333;
+            color: #aaa;
+            text-decoration: none;
+            border-radius: 6px;
+            margin-top: 10px;
+        }
+
+        .btn-back:hover {
+            background: #444;
+            color: #fff;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="main-col">
+        <h1>🏗️ Scale In/Out (Pyramiding)</h1>
+        <div class="subtitle">Pine Script Strategy: Pyramiding Entry & Partial Exit Visualization</div>
+        <div id="chart-container"></div>
+    </div>
+
+    <div class="sidebar">
+        <div class="control-group">
+            <h3>🟢 Scale In (분할 매수 - 진입)</h3>
+            <div class="btn-group">
+                <button class="btn btn-buy" onclick="buy(1)">Initial (1)</button>
+                <button class="btn btn-buy" onclick="buy(2)">Add (2)</button>
+                <button class="btn btn-buy" onclick="buy(3)">Add (3)</button>
+            </div>
+            <p style="font-size: 11px; color: #888; margin-top: 5px;">* 추세가 확인될 때마다 불타기(Pyramiding)</p>
+        </div>
+
+        <div class="control-group">
+            <h3>🔴 Scale Out (분할 매도 - 청산)</h3>
+            <div class="btn-group">
+                <button class="btn btn-sell" onclick="sell(0.3)">30% Exit</button>
+                <button class="btn btn-sell" onclick="sell(0.5)">50% Exit</button>
+                <button class="btn btn-sell" onclick="sell(1.0)">All Exit</button>
+            </div>
+            <p style="font-size: 11px; color: #888; margin-top: 5px;">* 단계별 익절로 수익 보존 (Trailing)</p>
+        </div>
+
+        <div class="control-group" style="background: #1e1e1e; border: 1px solid #E040FB;">
+            <h3>📊 포지션 현황 (Status)</h3>
+            <div class="result-row">
+                <span>Total Size</span>
+                <span class="result-val highlight" id="total-size">0</span>
+            </div>
+            <div class="result-row">
+                <span>Avg Price</span>
+                <span class="result-val" id="avg-price">--</span>
+            </div>
+            <hr style="border-color: #333; margin: 10px 0;">
+            <div class="result-row">
+                <span>미실현 손익 (Unrealized)</span>
+                <span class="result-val" id="unrealized-pnl">0.00</span>
+            </div>
+            <div class="result-row">
+                <span>실현 손익 (Realized)</span>
+                <span class="result-val" id="realized-pnl">0.00</span>
+            </div>
+        </div>
+
+        <div class="guide-text">
+            * <strong>Pyramiding</strong>: 수익이 날 때 포지션을 추가하여 이익을 극대화합니다.<br>
+            * <strong>Avg Price Line</strong>: 추가 진입 시 변동하는 평단가를 보라색 라인으로 확인하세요.<br>
+            * <strong>Partial Exit</strong>: 목표가 도달 시 비중을 줄여 리스크를 낮춥니다.
+        </div>
+
+        <a href="../index.html" class="btn-back">⬅️ 메인으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

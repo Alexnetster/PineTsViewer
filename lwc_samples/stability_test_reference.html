@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stability Test Reference - EMA Crossover</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries, HistogramSeries, createSeriesMarkers } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data Generator =====
+        function generateMockOHLCV(bars = 100) {
+            // FIXED: Use 2024-01-01 as base time instead of Date.now() to avoid negative timestamps
+            const now = 1704067200; // 2024-01-01 00:00:00 UTC
+            const data = [];
+            let basePrice = 100;
+
+            for (let i = 0; i < bars; i++) {
+                const time = now + i * 86400; // FIXED: 증가하는 타임스탬프 (양수 보장)
+                const trend = Math.sin(i / 10) * 5;
+                const noise = (Math.random() - 0.5) * 3;
+                basePrice += trend + noise;
+
+                const open = basePrice + (Math.random() - 0.5) * 2;
+                const close = basePrice + (Math.random() - 0.5) * 2;
+                const high = Math.max(open, close) + Math.random() * 3;
+                const low = Math.min(open, close) - Math.random() * 3;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+
+                data.push({
+                    time,
+                    open: parseFloat(open.toFixed(2)),
+                    high: parseFloat(high.toFixed(2)),
+                    low: parseFloat(low.toFixed(2)),
+                    close: parseFloat(close.toFixed(2)),
+                    volume // Volume Added
+                });
+            }
+            return data;
+        }
+
+        // ===== EMA Calculator =====
+        function calculateEMA(data, period) {
+            const result = [];
+            const multiplier = 2 / (period + 1);
+
+            let ema = 0;
+            for (let i = 0; i < period && i < data.length; i++) {
+                ema += data[i];
+            }
+            ema /= period;
+
+            for (let i = 0; i < data.length; i++) {
+                if (i < period - 1) {
+                    result.push(NaN);
+                    continue;
+                }
+
+                if (i === period - 1) {
+                    result.push(ema);
+                } else {
+                    ema = (data[i] - ema) * multiplier + ema;
+                    result.push(ema);
+                }
+            }
+            return result;
+        }
+
+        // ===== Crossover Detection =====
+        function detectCrossover(series1, series2) {
+            const result = [];
+            for (let i = 0; i < series1.length; i++) {
+                if (i === 0) {
+                    result.push(false);
+                    continue;
+                }
+
+                const current1 = series1[i];
+                const current2 = series2[i];
+                const prev1 = series1[i - 1];
+                const prev2 = series2[i - 1];
+
+                if (isNaN(current1) || isNaN(current2) || isNaN(prev1) || isNaN(prev2)) {
+                    result.push(false);
+                    continue;
+                }
+
+                const crossover = prev1 <= prev2 && current1 > current2;
+                result.push(crossover);
+            }
+            return result;
+        }
+
+        function detectCrossunder(series1, series2) {
+            const result = [];
+            for (let i = 0; i < series1.length; i++) {
+                if (i === 0) {
+                    result.push(false);
+                    continue;
+                }
+
+                const current1 = series1[i];
+                const current2 = series2[i];
+                const prev1 = series1[i - 1];
+                const prev2 = series2[i - 1];
+
+                if (isNaN(current1) || isNaN(current2) || isNaN(prev1) || isNaN(prev2)) {
+                    result.push(false);
+                    continue;
+                }
+
+                const crossunder = prev1 >= prev2 && current1 < current2;
+                result.push(crossunder);
+            }
+            return result;
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main Execution =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart');
+
+            try {
+                log('🚀 Stability Test Reference 시작');
+
+                // 1. Mock 데이터 생성
+                log('Mock OHLCV 데이터 생성 중...');
+                const ohlcData = generateMockOHLCV(100);
+                const closeData = ohlcData.map(d => d.close);
+                log(`✓ ${ohlcData.length}개 바 생성 완료`, 'success');
+
+                // 2. EMA 계산
+                log('EMA(10), EMA(50) 계산 중...');
+                const fastEMA = calculateEMA(closeData, 10);
+                const slowEMA = calculateEMA(closeData, 50);
+                log(`✓ EMA 계산 완료`, 'success');
+                log(`  - Fast EMA(10) 마지막 값: ${fastEMA[fastEMA.length - 1].toFixed(2)}`, 'info');
+                log(`  - Slow EMA(50) 마지막 값: ${slowEMA[slowEMA.length - 1].toFixed(2)}`, 'info');
+
+                // 3. Crossover 감지
+                log('Crossover/Crossunder 감지 중...');
+                const buySignals = detectCrossover(fastEMA, slowEMA);
+                const sellSignals = detectCrossunder(fastEMA, slowEMA);
+
+                const buyCount = buySignals.filter(b => b).length;
+                const sellCount = sellSignals.filter(s => s).length;
+                log(`✓ Buy 시그널: ${buyCount}개, Sell 시그널: ${sellCount}개`, 'success');
+
+                // 4. 차트 생성
+                log('LightWeight-Charts 차트 생성 중...');
+                const chart = createChart(container, {
+                    layout: {
+                        background: { type: 'solid', color: '#1a1a1a' },
+                        textColor: '#d1d4dc',
+                    },
+                    grid: {
+                        vertLines: { color: '#2b2b2b' },
+                        horzLines: { color: '#2b2b2b' },
+                    },
+                    width: container.clientWidth,
+                    height: 600,
+                    timeScale: {
+                        timeVisible: true,
+                        secondsVisible: false,
+                    }
+                });
+
+                // 5. Candlestick Series
+                const candlestickSeries = chart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a',
+                    downColor: '#ef5350',
+                    borderVisible: false,
+                    wickUpColor: '#26a69a',
+                    wickDownColor: '#ef5350',
+                });
+                candlestickSeries.setData(ohlcData);
+                log('✓ Candlestick 시리즈 추가', 'success');
+
+                // Volume Series (Overlay)
+                const volumeSeries = chart.addSeries(HistogramSeries, {
+                    color: '#26a69a',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: '',
+                });
+                volumeSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.8, bottom: 0 },
+                });
+                volumeSeries.setData(ohlcData.map(d => ({
+                    time: d.time,
+                    value: d.volume,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+                log('✓ Volume 시리즈 추가 (Overlay)', 'success');
+
+                // 6. Fast EMA Line
+                const fastEMASeries = chart.addSeries(LineSeries, {
+                    color: '#00d4ff',
+                    lineWidth: 2,
+                    title: 'Fast EMA(10)',
+                });
+                const fastEMAData = ohlcData.map((d, i) => ({
+                    time: d.time,
+                    value: fastEMA[i]
+                })).filter(d => !isNaN(d.value));
+                fastEMASeries.setData(fastEMAData);
+                log('✓ Fast EMA(10) 라인 추가', 'success');
+
+                // 7. Slow EMA Line
+                const slowEMASeries = chart.addSeries(LineSeries, {
+                    color: '#ff9800',
+                    lineWidth: 2,
+                    title: 'Slow EMA(50)',
+                });
+                const slowEMAData = ohlcData.map((d, i) => ({
+                    time: d.time,
+                    value: slowEMA[i]
+                })).filter(d => !isNaN(d.value));
+                slowEMASeries.setData(slowEMAData);
+                log('✓ Slow EMA(50) 라인 추가', 'success');
+
+                // 8. Markers (Buy/Sell Signals)
+                const markers = [];
+                for (let i = 0; i < ohlcData.length; i++) {
+                    if (buySignals[i]) {
+                        markers.push({
+                            time: ohlcData[i].time,
+                            position: 'belowBar',
+                            color: '#00ff00',
+                            shape: 'arrowUp',
+                            text: 'Buy',
+                        });
+                    }
+                    if (sellSignals[i]) {
+                        markers.push({
+                            time: ohlcData[i].time,
+                            position: 'aboveBar',
+                            color: '#ff0000',
+                            shape: 'arrowDown',
+                            text: 'Sell',
+                        });
+                    }
+                }
+
+                createSeriesMarkers(candlestickSeries, markers);
+                log(`✓ ${markers.length}개 마커 추가 완료`, 'success');
+
+                // IMPORTANT: fitContent를 지연 실행하여 차트가 완전히 준비된 후 호출
+                setTimeout(() => {
+                    chart.timeScale().fitContent();
+                    log('✓ 차트 뷰포트 자동 조정 완료', 'success');
+                }, 100);
+
+                log('=== ✅ 모든 렌더링 완료 ===', 'success');
+
+                // 9. 데이터 덤프 (검증용)
+                window.referenceData = {
+                    ohlc: ohlcData,
+                    fastEMA: fastEMA,
+                    slowEMA: slowEMA,
+                    buySignals: buySignals.map((b, i) => b ? i : null).filter(i => i !== null),
+                    sellSignals: sellSignals.map((s, i) => s ? i : null).filter(i => i !== null),
+                    markers: markers
+                };
+                log('💾 window.referenceData에 검증 데이터 저장됨', 'info');
+                log('콘솔에서 JSON.stringify(window.referenceData) 실행 가능', 'info');
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>📊 Stability Test Reference - EMA Crossover Strategy</h1>
+    <div class="subtitle">Pine Script: stability_test.pine → Pure LWC TypeScript Implementation</div>
+
+    <div class="container">
+        <div id="chart"></div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>Fast EMA(10)</strong>: 파란색 라인 (<code>color.aqua</code>)</li>
+            <li><strong>Slow EMA(50)</strong>: 주황색 라인 (<code>color.orange</code>)</li>
+            <li><strong>Buy Signal</strong>: Fast EMA가 Slow EMA를 상향 돌파 시 녹색 화살표</li>
+            <li><strong>Sell Signal</strong>: Fast EMA가 Slow EMA를 하향 돌파 시 빨간색 화살표</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li>브라우저 콘솔에서 <code>JSON.stringify(window.referenceData)</code> 실행</li>
+            <li>PineTS 컴파일 결과와 EMA 값, 마커 위치 비교</li>
+            <li>시각적으로 두 차트가 동일한지 확인</li>
+        </ul>
+    </div>
+
+    <div style="text-align: center; margin-bottom: 30px;">
+        <a href="index.html" class="nav-button">⬅️ 샘플 목록으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

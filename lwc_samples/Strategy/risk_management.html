@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Risk Management Strategy</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, LineSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== ATR Logic (Reused) =====
+        function ta_atr(data, length = 14) {
+            const trs = [];
+            for (let i = 0; i < data.length; i++) {
+                const h = data[i].high;
+                const l = data[i].low;
+                let tr = h - l;
+                if (i > 0) {
+                    const prevC = data[i - 1].close;
+                    tr = Math.max(tr, Math.abs(h - prevC), Math.abs(l - prevC));
+                }
+                trs.push(tr);
+            }
+            const result = [];
+            let rma = 0;
+            // Simple SMA init
+            let initialSum = 0;
+            for (let i = 0; i < length; i++) initialSum += trs[i];
+            rma = initialSum / length;
+            result[length - 1] = { time: data[length - 1].time, value: rma };
+
+            for (let i = length; i < data.length; i++) {
+                rma = (rma * (length - 1) + trs[i]) / length;
+                result.push({ time: data[i].time, value: rma });
+            }
+            return result;
+        }
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 200) {
+            const now = Math.floor(Date.now() / 1000) - bars * 86400;
+            const data = [];
+            let price = 10000; // Base Price
+            for (let i = 0; i < bars; i++) {
+                const volMultiplier = (Math.sin(i / 20) + 1.5);
+                const trend = Math.sin(i / 50) * 100;
+                const open = price + trend * 0.1 + (Math.random() - 0.5) * 50;
+                const high = open + Math.random() * 50 * volMultiplier;
+                const low = open - Math.random() * 50 * volMultiplier;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 20;
+                data.push({ time: now + i * 86400, open, high, low, close });
+                price = close;
+            }
+            return data;
+        }
+
+        // ===== App Logic =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart-container');
+            const data = generateMockOHLCV(300);
+
+            // Calculate ATR
+            const atrData = ta_atr(data, 14);
+            // Get latest ATR
+            let latestATR = atrData[atrData.length - 1].value;
+            let currentPrice = data[data.length - 1].close;
+
+            // Chart Init
+            const chart = createChart(container, {
+                layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                width: container.clientWidth,
+                height: 500,
+                timeScale: { timeVisible: true, secondsVisible: false },
+                crosshair: { mode: 0 } // Magnet mode
+            });
+
+            const candleSeries = chart.addSeries(CandlestickSeries);
+            candleSeries.setData(data);
+
+            // Lines
+            let entryLine = null;
+            let slLine = null;
+            let tpLine = null;
+
+            // UI Elements
+            const elEntryPrice = document.getElementById('entry-price');
+            const elAtrVal = document.getElementById('atr-value');
+            const elRiskPercent = document.getElementById('risk-percent');
+            const elPortfolio = document.getElementById('portfolio-size');
+            const elSlMult = document.getElementById('sl-mult');
+            const elTpMult = document.getElementById('tp-mult');
+            const elPositionType = document.getElementById('position-type');
+
+            const resRiskAmount = document.getElementById('res-risk-amount');
+            const resPosSize = document.getElementById('res-pos-size');
+            const resRrRatio = document.getElementById('res-rr-ratio');
+            const resSlPrice = document.getElementById('res-sl-price');
+            const resTpPrice = document.getElementById('res-tp-price');
+
+            // Init Values
+            elEntryPrice.value = currentPrice.toFixed(2);
+            elAtrVal.textContent = latestATR.toFixed(2);
+
+            function updateLines() {
+                const entry = parseFloat(elEntryPrice.value);
+                const slMult = parseFloat(elSlMult.value);
+                const tpMult = parseFloat(elTpMult.value);
+                const isLong = elPositionType.value === 'long';
+
+                // Calc Levels
+                const slDist = latestATR * slMult;
+                const tpDist = latestATR * tpMult;
+
+                const slPrice = isLong ? entry - slDist : entry + slDist;
+                const tpPrice = isLong ? entry + tpDist : entry - tpDist;
+
+                // Update UI results
+                resSlPrice.textContent = slPrice.toFixed(2);
+                resTpPrice.textContent = tpPrice.toFixed(2);
+
+                // Risk Calc
+                const portfolio = parseFloat(elPortfolio.value);
+                const riskPct = parseFloat(elRiskPercent.value);
+                const riskAmount = portfolio * (riskPct / 100);
+
+                // Position Size = Risk Amount / |Entry - SL|
+                const priceDiff = Math.abs(entry - slPrice);
+                // Avoid division by zero
+                const posSize = priceDiff > 0 ? (riskAmount / priceDiff) : 0;
+
+                resRiskAmount.textContent = Math.round(riskAmount).toLocaleString();
+                resPosSize.textContent = posSize.toFixed(4) + " units"; // e.g., BTC amount
+
+                // RR Ratio
+                const rewardDist = Math.abs(tpPrice - entry);
+                const rr = priceDiff > 0 ? (rewardDist / priceDiff) : 0;
+                resRrRatio.textContent = "1 : " + rr.toFixed(2);
+
+                // Draw Lines on Chart
+                if (entryLine) candleSeries.removePriceLine(entryLine);
+                if (slLine) candleSeries.removePriceLine(slLine);
+                if (tpLine) candleSeries.removePriceLine(tpLine);
+
+                entryLine = candleSeries.createPriceLine({
+                    price: entry,
+                    color: '#2196F3', // Blue
+                    lineWidth: 2,
+                    lineStyle: 0, // Solid
+                    axisLabelVisible: true,
+                    title: 'ENTRY',
+                });
+
+                slLine = candleSeries.createPriceLine({
+                    price: slPrice,
+                    color: '#EF5350', // Red
+                    lineWidth: 2,
+                    lineStyle: 0,
+                    axisLabelVisible: true,
+                    title: `SL (${slMult}x ATR)`,
+                });
+
+                tpLine = candleSeries.createPriceLine({
+                    price: tpPrice,
+                    color: '#00E676', // Green
+                    lineWidth: 2,
+                    lineStyle: 0,
+                    axisLabelVisible: true,
+                    title: `TP (${tpMult}x ATR)`,
+                });
+            }
+
+            // Click Handler
+            chart.subscribeClick((param) => {
+                if (param.point) {
+                    const price = candleSeries.coordinateToPrice(param.point.y);
+                    if (price) {
+                        elEntryPrice.value = price.toFixed(2);
+                        updateLines();
+                    }
+                }
+            });
+
+            // Event Listeners
+            [elEntryPrice, elRiskPercent, elPortfolio, elSlMult, elTpMult, elPositionType].forEach(el => {
+                el.addEventListener('change', updateLines);
+                el.addEventListener('input', updateLines);
+            });
+
+            // Initial Draw
+            updateLines();
+
+            // Resize
+            window.addEventListener('resize', () => {
+                chart.applyOptions({ width: container.clientWidth });
+            });
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+            display: flex;
+            height: 100vh;
+            gap: 20px;
+        }
+
+        .main-col {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar {
+            width: 350px;
+            background: #1a1a1a;
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        #chart-container {
+            flex: 1;
+            border: 1px solid #333;
+            border-radius: 8px;
+            background: #151515;
+            position: relative;
+        }
+
+        h1 {
+            color: #00E676;
+            font-size: 22px;
+            margin-bottom: 5px;
+        }
+
+        .subtitle {
+            color: #888;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+
+        .control-group {
+            background: #252525;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .control-group h3 {
+            font-size: 14px;
+            color: #bbb;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+        }
+
+        .input-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .input-row label {
+            font-size: 13px;
+            color: #aaa;
+        }
+
+        input,
+        select {
+            background: #333;
+            border: 1px solid #444;
+            color: #fff;
+            padding: 5px;
+            border-radius: 4px;
+            width: 120px;
+            text-align: right;
+        }
+
+        .result-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .result-val {
+            font-weight: bold;
+            color: #fff;
+        }
+
+        .highlight {
+            color: #00d4ff;
+        }
+
+        .red {
+            color: #EF5350;
+        }
+
+        .green {
+            color: #00E676;
+        }
+
+        .atr-display {
+            font-size: 12px;
+            color: #888;
+            text-align: right;
+            margin-top: -10px;
+            margin-bottom: 10px;
+        }
+
+        .guide-text {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.4;
+            margin-top: auto;
+        }
+
+        .btn-back {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            text-align: center;
+            background: #333;
+            color: #aaa;
+            text-decoration: none;
+            border-radius: 6px;
+            margin-top: 10px;
+        }
+
+        .btn-back:hover {
+            background: #444;
+            color: #fff;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="main-col">
+        <h1>🛡️ ATR Risk Management System</h1>
+        <div class="subtitle">Pine Script Strategy Logic Visualization: ATR Trailing / Position Sizing</div>
+        <div id="chart-container"></div>
+    </div>
+
+    <div class="sidebar">
+        <div class="control-group">
+            <h3>📈 포지션 설정 (Position Settings)</h3>
+            <div class="input-row">
+                <label>포지션 방향</label>
+                <select id="position-type">
+                    <option value="long">Long (매수)</option>
+                    <option value="short">Short (매도)</option>
+                </select>
+            </div>
+            <div class="input-row">
+                <label>진입 가격 (Entry)</label>
+                <input type="number" id="entry-price" step="0.5">
+            </div>
+            <div class="atr-display">현재 ATR(14): <span id="atr-value" class="highlight">--</span></div>
+            <div class="input-row">
+                <label>자본금 (Portfolio)</label>
+                <input type="number" id="portfolio-size" value="10000">
+            </div>
+            <div class="input-row">
+                <label>리스크 허용 (%)</label>
+                <input type="number" id="risk-percent" value="2" step="0.1">
+            </div>
+        </div>
+
+        <div class="control-group">
+            <h3>🛑 손절/익절 (Risk Parameters)</h3>
+            <div class="input-row">
+                <label>손절 (SL) ATR 배수</label>
+                <input type="number" id="sl-mult" value="2.0" step="0.1">
+            </div>
+            <div class="input-row">
+                <label>익절 (TP) ATR 배수</label>
+                <input type="number" id="tp-mult" value="4.0" step="0.1">
+            </div>
+        </div>
+
+        <div class="control-group" style="background: #1e1e1e; border: 1px solid #00d4ff;">
+            <h3>📊 계산 결과 (Strategy Output)</h3>
+            <div class="result-row">
+                <span>손실 허용액 (Risk $)</span>
+                <span class="result-val red" id="res-risk-amount">--</span>
+            </div>
+            <div class="result-row">
+                <span>진입 수량 (Size)</span>
+                <span class="result-val highlight" id="res-pos-size">--</span>
+            </div>
+            <div class="result-row">
+                <span>손익비 (R:R)</span>
+                <span class="result-val" id="res-rr-ratio">--</span>
+            </div>
+            <hr style="border-color: #333; margin: 10px 0;">
+            <div class="result-row">
+                <span>Stop Loss Price</span>
+                <span class="result-val red" id="res-sl-price">--</span>
+            </div>
+            <div class="result-row">
+                <span>Take Profit Price</span>
+                <span class="result-val green" id="res-tp-price">--</span>
+            </div>
+        </div>
+
+        <div class="guide-text">
+            * 차트를 클릭하면 해당 가격이 <strong>진입가(Entry)</strong>로 자동 설정됩니다.<br>
+            * ATR 기반으로 변동성에 비례한 안전 마진을 확보하세요.<br>
+            * 일반적으로 2.0~3.0 ATR을 손절폭으로 사용합니다.
+        </div>
+
+        <a href="../index.html" class="btn-back">⬅️ 메인으로 돌아가기</a>
+    </div>
+</body>
+
+</html>

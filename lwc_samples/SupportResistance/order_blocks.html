@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Order Blocks Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 200) {
+            const now = 1704067200;
+            const data = [];
+            let price = 100;
+            for (let i = 0; i < bars; i++) {
+                const trend = Math.sin(i / 20) * 10;
+                const open = price + trend * 0.1 + (Math.random() - 0.5) * 4;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({ time: now + i * 86400, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ===== Order Blocks Logic (Simplified) =====
+        // 1. Identify Swing Highs/Lows (Pivots)
+        // 2. Bullish OB: The last RED candle before a strong move UP that breaks structure (Pivot High).
+        // 3. Bearish OB: The last GREEN candle before a strong move DOWN that breaks structure (Pivot Low).
+        // For simplicity: We will just detect pivots and mark the candle at the pivot as OB.
+
+        function identifyOrderBlocks(data, period = 5) {
+            const ob = [];
+
+            // Helper to get highest/lowest in range
+            const getHighest = (idx, len) => {
+                let max = -Infinity;
+                for (let i = idx - len; i <= idx + len; i++) {
+                    if (i < 0 || i >= data.length) continue;
+                    if (data[i].high > max) max = data[i].high;
+                }
+                return max;
+            };
+
+            // Simple Pivot Detection
+            for (let i = period; i < data.length - period; i++) {
+                const currentLow = data[i].low;
+                const currentHigh = data[i].high;
+
+                let isPivotLow = true;
+                let isPivotHigh = true;
+
+                for (let j = 1; j <= period; j++) {
+                    if (data[i - j].low <= currentLow || data[i + j].low <= currentLow) isPivotLow = false;
+                    if (data[i - j].high >= currentHigh || data[i + j].high >= currentHigh) isPivotHigh = false;
+                }
+
+                if (isPivotLow) {
+                    // Bullish OB candidate: The candle forming the low (or the red candle before it)
+                    // We take the candle itself for simplicity in this visual demo
+                    ob.push({
+                        type: 'bullish',
+                        time: data[i].time,
+                        top: data[i].high,
+                        bottom: data[i].low,
+                        idx: i
+                    });
+                }
+
+                if (isPivotHigh) {
+                    ob.push({
+                        type: 'bearish',
+                        time: data[i].time,
+                        top: data[i].high,
+                        bottom: data[i].low,
+                        idx: i
+                    });
+                }
+            }
+
+            // Filter OBs: Ideally checking for Break of Structure (BOS)
+            // Here we assume all Swing Points are potential OBs but filter for 'strong' moves later?
+            // Just return all simple pivots as OBs for demo visualization
+            return ob;
+        }
+
+        // ===== Box Renderer (Series Primitive) =====
+        // Renders rectangles extended to the right
+        class BoxRenderer {
+            constructor() { this._data = null; }
+            setData(data) { this._data = data; }
+            draw(target) {
+                if (!this._data || this._data.boxes.length === 0) return;
+                target.useBitmapCoordinateSpace(scope => {
+                    const ctx = scope.context;
+                    const horizontalPixelRatio = scope.horizontalPixelRatio;
+                    const verticalPixelRatio = scope.verticalPixelRatio;
+                    ctx.save();
+                    ctx.scale(horizontalPixelRatio, verticalPixelRatio);
+
+                    for (const box of this._data.boxes) {
+                        // box: { x, y, w, h, color }
+                        ctx.fillStyle = box.color;
+                        ctx.fillRect(box.x, box.y, box.w, box.h);
+                    }
+                    ctx.restore();
+                });
+            }
+        }
+
+        class BoxPaneView {
+            constructor(source) { this._source = source; this._renderer = new BoxRenderer(); }
+            renderer() { return this._renderer; }
+            zOrder() { return 'bottom'; } // Draw behind candles
+        }
+
+        class OrderBlockPrimitive {
+            constructor() {
+                this._paneViews = [new BoxPaneView(this)];
+                this._obData = [];
+                this._timeScale = null;
+                this._series = null;
+            }
+            setData(obData) {
+                this._obData = obData;
+                this.update();
+            }
+            paneViews() { return this._paneViews; }
+            attached(param) {
+                this._chart = param.chart;
+                this._series = param.series;
+                this._requestUpdate = param.requestUpdate;
+                this.update();
+            }
+            detached() {
+                this._chart = null;
+                this._series = null;
+                this._requestUpdate = null;
+            }
+            update() {
+                if (this._requestUpdate) this._requestUpdate(); // Request redrawing
+            }
+            updateAllViews(param) {
+                // Prepare data for renderer
+                if (!this._chart || !this._series) return;
+
+                const timeScale = this._chart.timeScale();
+                const visibleRange = timeScale.getVisibleLogicalRange();
+
+                const boxes = [];
+                const rightX = timeScale.timeToCoordinate(timeScale.getVisibleRange()?.to || 0) + 300; // Extend to right
+                // Actually getting coordinate of 'latest bar + X pixels' is tricky without knowing chart width.
+                // We'll just draw from box start time to specific width or until Price hits it?
+                // For demo: Draw fixed width (e.g., 50 bars worth of pixels or just screen width)
+                // Let's draw from OB time to Screen Right edge + small padding.
+
+                // We need canvas width. 'scope' in renderer gives us size?
+                // Let's pass 'boxes' with logical coordinates or screen coordinates?
+                // Renderer receives 'scope', we can calc there?
+                // No, standard is calculate in 'renderer()' call or here if we have chart access.
+                // But 'updateAllViews' doesn't return data. The VIEW calculates data.
+
+                // Let's move calculation to Renderer or a method called by Renderer.
+                // But Renderer is pure canvas.
+                // We need to calculate SCREEN coordinates here, but we don't know 'scope.mediaSize'.
+                // Update: We should do coordinate conversion inside 'draw' or prepare standardized data.
+                // Here we prepare { time, top, bottom } and let Renderer convert.
+
+                // Wait, Renderer needs screen coordinates. 
+                // We typically use `timeScale.timeToCoordinate(time)` inside logic.
+                // BUT `timeToCoordinate` is valid here.
+
+                if (!visibleRange) return;
+
+                const obList = this._obData;
+                // Filter visible boxes? Or just all.
+
+                const rendererData = { boxes: [] };
+
+                // Let's just create 'rendererData' in Update and pass it?
+                // The renderer instance is persistent. We can call setData on it.
+                // But we need to do it every frame or when data changes?
+                // updateAllViews is called before draw? No, it's irrelevant.
+
+                // The correct flow:
+                // 1. Chart calls `paneViews[i].renderer().draw(target)`
+                // 2. We need to update existing renderer with NEW screen coordinates?
+                //    No, usually we recalculate coordinates in `draw`? 
+                //    Wait, `timeScale.timeToCoordinate` is NOT available in `draw` (canvas context only).
+                //    So we MUST calculate in `attached` or `updateAllViews`? 
+                //    Actually `updateAllViews` is deprecated/not used the same way. 
+                //    We usually hook into `timeScale().subscribeVisibleLogicalRangeChange`.
+
+                // Simplest way for LWC primitives:
+                // The `draw` function receives `scope`. But `scope` doesn't have `timeScale`.
+                // So we must update the Renderer's data whenever the chart updates (scroll/zoom).
+                // We can bind to `timeScale.subscribeVisibleTimeRangeChange`.
+            }
+        }
+
+        // Revised Primitive using correctly delegated update
+        // We will calc coords in a function we call from `draw`? No.
+        // We will update the renderer data on every 'LogicalRangeChange'.
+
+        class RealOrderBlockPrimitive {
+            constructor(chart, series, data) {
+                this._chart = chart;
+                this._series = series;
+                this._data = data;
+                this._renderer = new BoxRenderer();
+                this._paneView = {
+                    renderer: () => this._renderer,
+                    zOrder: () => 'bottom'
+                };
+            }
+
+            attached(param) {
+                this._requestUpdate = param.requestUpdate;
+                this._chart.timeScale().subscribeVisibleLogicalRangeChange(() => this._updateCoords());
+                this._updateCoords(); // Initial
+            }
+
+            detached() {
+                // unsubscribe
+            }
+
+            paneViews() { return [this._paneView]; }
+
+            _updateCoords() {
+                if (!this._chart || !this._series) return;
+                const timeScale = this._chart.timeScale();
+
+                // 1. Get visible range to optimize
+                // 2. Map data to coordinates
+                const boxes = [];
+                const chartWidth = this._chart.timeScale().width();
+                // TimeScale width not directly accessible like that safely? 
+                // `chart.timeScale().scrollPosition()` etc.
+                // We can use a large number for 'Right'. 
+
+                const now = timeScale.timeToCoordinate(this._data[this._data.length - 1].time) || 0;
+                const farRight = now + 1000; // Just extend simple way
+
+                for (const ob of this._data) {
+                    const x = timeScale.timeToCoordinate(ob.time);
+                    if (x === null) continue; // Out of range or invalid?
+
+                    const yTop = this._series.priceToCoordinate(ob.top);
+                    const yBottom = this._series.priceToCoordinate(ob.bottom);
+
+                    if (yTop === null || yBottom === null) continue;
+
+                    const width = farRight - x;
+                    const height = yBottom - yTop; // y increases downwards
+
+                    // Filter OBs that are completely off screen to left? 
+                    // x + width > 0. Since width is huge, usually visible.
+
+                    boxes.push({
+                        x: x,
+                        y: yTop,
+                        w: width,
+                        h: height,
+                        color: ob.type === 'bullish' ? 'rgba(0, 230, 118, 0.2)' : 'rgba(255, 82, 82, 0.2)'
+                    });
+                }
+
+                this._renderer.setData({ boxes });
+                this._requestUpdate();
+            }
+        }
+
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart');
+
+            try {
+                log('🚀 Order Blocks Reference 시작');
+                const data = generateMockOHLCV(300);
+                log(`✓ ${data.length}개 바 생성 완료`, 'success');
+
+                const chart = createChart(container, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const candleSeries = chart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+                });
+                candleSeries.setData(data);
+
+                // Identify OBs
+                const obs = identifyOrderBlocks(data, 10); // Period 10 for pivots
+                log(`✓ ${obs.length}개 Order Block 식별됨`, 'success');
+
+                // Attach Primitive
+                // Note: creating instance manually with chart reference because attached() doesn't give chart in simpler versions of LWC interfaces usually (actually it does in 5.x)
+                // But our class structure relies on it.
+                // We'll use the proper API: series.attachPrimitive(obj) -> obj.attached({chart, series, requestUpdate})
+
+                // Let's refactor `RealOrderBlockPrimitive` to not need chart in constructor, but wait for attached.
+                // Problem: `subscribeVisibleLogicalRangeChange` is on `chart.timeScale()`.
+                // `attached(param)` provides `chart`. So it works.
+
+                class OBPrimitive {
+                    constructor(data) {
+                        this._data = data;
+                        this._renderer = new BoxRenderer();
+                        this._paneView = {
+                            renderer: () => this._renderer,
+                            zOrder: () => 'bottom'
+                        };
+                    }
+                    attached(param) {
+                        this._chart = param.chart;
+                        this._series = param.series;
+                        this._requestUpdate = param.requestUpdate;
+
+                        const ts = this._chart.timeScale();
+                        // We need to bind `this` correctly
+                        this._sub = () => this._updateCoords();
+                        ts.subscribeVisibleLogicalRangeChange(this._sub);
+                        this._updateCoords();
+                    }
+                    detached() {
+                        if (this._chart) {
+                            this._chart.timeScale().unsubscribeVisibleLogicalRangeChange(this._sub);
+                        }
+                    }
+                    paneViews() { return [this._paneView]; }
+                    _updateCoords() {
+                        if (!this._chart || !this._series) return;
+                        const ts = this._chart.timeScale();
+                        const boxes = [];
+                        // Simple extension to 'infinite' right logic
+                        // We can guess coordinate of 'Right Edge of canvas'?
+                        // LWC doesn't expose Canvas Width easily in Logic.
+                        // We just use a large offset from the last bar time coordinate.
+
+                        const lastBarTime = this._data[this._data.length - 1].time;
+                        const lastX = ts.timeToCoordinate(lastBarTime);
+                        const farRightX = lastX ? lastX + 10000 : 10000;
+
+                        for (const ob of this._data) {
+                            const x = ts.timeToCoordinate(ob.time);
+                            if (x === null) continue;
+
+                            const yTop = this._series.priceToCoordinate(ob.top);
+                            const yBottom = this._series.priceToCoordinate(ob.bottom);
+
+                            if (yTop === null || yBottom === null) continue;
+
+                            const w = farRightX - x;
+                            const h = yBottom - yTop; // Height is positive if yBottom > yTop (screen coords increase down)
+
+                            boxes.push({
+                                x: x,
+                                y: yTop,
+                                w: w,
+                                h: h,
+                                color: ob.type === 'bullish' ? 'rgba(0, 230, 118, 0.2)' : 'rgba(255, 82, 82, 0.2)'
+                            });
+                        }
+                        this._renderer.setData({ boxes });
+                        this._requestUpdate();
+                    }
+                }
+
+                const obPrimitive = new OBPrimitive(obs);
+                candleSeries.attachPrimitive(obPrimitive);
+                log('✓ Order Block Primitive 적용 완료', 'success');
+
+                // Auto Resize
+                window.addEventListener('resize', () => {
+                    if (container.clientWidth > 0) {
+                        chart.applyOptions({ width: container.clientWidth });
+                    }
+                });
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div id="chart" style="height: 600px;"></div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>핵심 로직</strong>: 최근 캔들 중 의미 있는 고점/저점(Pivot)을 자동으로 찾습니다.</li>
+            <li><strong>시각화</strong>: 상승 주문 블록(매수세)은 초록색 박스, 하락 주문 블록(매도세)은 빨간색 박스로 그립니다.</li>
+            <li><strong>박스 확장</strong>: 각 박스는 해당 가격대의 영향력이 지속됨을 보여주기 위해 차트 오른쪽 끝까지 길게 그려집니다.</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li><strong>박스 생성</strong>: 차트의 뾰족한 고점이나 저점 위치에 정확히 박스가 생기는지 확인하세요.</li>
+            <li><strong>고정 여부</strong>: 차트를 좌우로 스크롤했을 때 박스가 엉뚱한 곳으로 이동하지 않고 가격대에 잘 고정되어 있어야 합니다.</li>
+            <li><strong>줌 테스트</strong>: 차트를 확대/축소해도 박스 높이가 캔들 크기에 맞춰 올바르게 유지되는지 확인하세요.</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Period</strong>: [기본: 5] 스윙 하이/로우를 식별하는 좌우 캔들 수.</li>
+            <li><strong>특징</strong>: 스마트 머니(기관)가 가격을 급격하게 움직이기 전에 남긴 마지막 반대 방향 캔들(매집/매도 흔적).</li>
+            <li><strong>장점</strong>: 막연한 지지/저항선보다 신뢰도가 높으며, 정확한 타점(손익비 좋음)을 제공.</li>
+            <li><strong>사용법</strong>: 가격이 Order Block 박스에 다시 도달(Retest)했을 때 반등을 예상하고 진입 (Limit Order).</li>
+            <li><strong>추천 시간대</strong>: 모든 시간대(Fractal). 하지만 1시간봉, 4시간봉 이상의 OB가 강력함.</li>
+            <li><strong>비추천</strong>: 뉴스 발표 직전(OB 무시하고 뚫릴 수 있음).</li>
+            <li><strong>시너지 지표</strong>: FVG(Fair Value Gap) - FVG를 채우러 가면서 OB에 도달할 때 가장 강력.</li>
+        </ul>
+
+    </div>
+</body>
+
+</html>

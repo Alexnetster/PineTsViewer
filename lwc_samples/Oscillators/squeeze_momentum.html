@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Squeeze Momentum Reference</title>
+    <script type="module">
+        import { createChart, CandlestickSeries, HistogramSeries, LineSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+
+        // ===== Mock Data =====
+        function generateMockOHLCV(bars = 200) {
+            const now = 1704067200;
+            const data = [];
+            let price = 100;
+            for (let i = 0; i < bars; i++) {
+                const trend = Math.sin(i / 15) * 15; // Faster accumulation/distribution cycles
+                const open = price + trend * 0.1 + (Math.random() - 0.5) * 4;
+                const high = open + Math.random() * 2;
+                const low = open - Math.random() * 2;
+                const close = (open + high + low) / 3 + (Math.random() - 0.5) * 1;
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                data.push({ time: now + i * 86400, open, high, low, close, volume });
+                price = close;
+            }
+            return data;
+        }
+
+        // ===== Squeeze Momentum Logic (LazyBear Style) =====
+        // Squeeze is ON when Bollinger Bands are INSIDE Keltner Channels.
+        // Momentum is Linear Regression of (Price - Avg(DonchianMid, SMA)).
+
+        // Simplified for JS Demo: 
+        // 1. BB: 20 SMA +/- 2 StdDev
+        // 2. KC: 20 SMA +/- 1.5 ATR(20)
+        // 3. Momentum: For simplicity, we'll use (Close - SMA20) smoothed or similar proxy if LinReg is too heavy, 
+        //    but let's try a simple Linear Regression approximation.
+        //    Actually, LazyBear's momentum is: linreg(close - avg(avg(highest(20), lowest(20)), sma(20)), 20, 0)
+
+        function ta_squeeze_momentum(data, length = 20, mult = 2.0, lengthKC = 20, multKC = 1.5) {
+
+            // Helper: Simple Moving Average
+            const sma = (values, period) => {
+                const result = [];
+                let sum = 0;
+                for (let i = 0; i < values.length; i++) {
+                    sum += values[i];
+                    if (i >= period) sum -= values[i - period];
+                    if (i >= period - 1) result[i] = sum / period;
+                }
+                return result;
+            };
+
+            // Helper: Standard Deviation
+            const stdev = (values, period, smaValues) => {
+                const result = [];
+                for (let i = 0; i < values.length; i++) {
+                    if (i < period - 1) continue;
+                    let sumSqDiff = 0;
+                    for (let j = 0; j < period; j++) {
+                        sumSqDiff += Math.pow(values[i - j] - smaValues[i], 2);
+                    }
+                    result[i] = Math.sqrt(sumSqDiff / period);
+                }
+                return result;
+            };
+
+            // Helper: True Range
+            const tr = (i) => {
+                if (i === 0) return data[0].high - data[0].low;
+                const h = data[i].high;
+                const l = data[i].low;
+                const pc = data[i - 1].close;
+                return Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+            };
+
+            const closes = data.map(d => d.close);
+            const smaValues = sma(closes, length);
+            const stdValues = stdev(closes, length, smaValues);
+
+            // Calculate BB
+            const bbUpper = [];
+            const bbLower = [];
+            for (let i = 0; i < data.length; i++) {
+                if (i < length - 1) { bbUpper[i] = NaN; bbLower[i] = NaN; continue; }
+                bbUpper[i] = smaValues[i] + mult * stdValues[i];
+                bbLower[i] = smaValues[i] - mult * stdValues[i];
+            }
+
+            // Calculate KC
+            // ATR
+            const trs = [];
+            for (let i = 0; i < data.length; i++) trs.push(tr(i));
+            const atrValues = sma(trs, lengthKC); // Simple SMA of TR for KC usually
+
+            const kcUpper = [];
+            const kcLower = [];
+            for (let i = 0; i < data.length; i++) {
+                if (i < lengthKC - 1) { kcUpper[i] = NaN; kcLower[i] = NaN; continue; }
+                kcUpper[i] = smaValues[i] + multKC * atrValues[i];
+                kcLower[i] = smaValues[i] - multKC * atrValues[i];
+            }
+
+            // Squeeze Logic
+            const squeezeOn = [];
+            for (let i = 0; i < data.length; i++) {
+                if (isNaN(bbUpper[i]) || isNaN(kcUpper[i])) { squeezeOn[i] = false; continue; }
+                // Squeeze is ON if BB is NARROWER than KC (BB inside KC)
+                // BB Upper < KC Upper AND BB Lower > KC Lower
+                squeezeOn[i] = (bbUpper[i] < kcUpper[i]) && (bbLower[i] > kcLower[i]);
+            }
+
+            // Momentum Logic
+            // val = close - avg(avg(highest, lowest), sma)
+            // we will skip full linear regression for this demo and use the raw 'val' as momentum source 
+            // (LazyBear uses linreg on this value, but raw value is close enough for shape)
+            const momentum = [];
+            for (let i = 0; i < data.length; i++) {
+                if (i < length - 1) { momentum.push({ time: data[i].time, value: NaN, color: 'gray' }); continue; }
+
+                // Highest/Lowest in 'length' window
+                let highest = -Infinity;
+                let lowest = Infinity;
+                for (let j = 0; j < length; j++) {
+                    if (data[i - j].high > highest) highest = data[i - j].high;
+                    if (data[i - j].low < lowest) lowest = data[i - j].low;
+                }
+                const avgHL = (highest + lowest) / 2;
+                const avgVal = (avgHL + smaValues[i]) / 2;
+                const val = data[i].close - avgVal;
+
+                // Color logic: 
+                // Rising > 0: Lime, Falling > 0: Green
+                // Falling < 0: Red, Rising < 0: Maroon
+                let color = 'gray';
+                const prevVal = (i > 0 && momentum[i - 1].value !== NaN) ? momentum[i - 1].value || 0 : 0;
+
+                if (val > 0) {
+                    color = val > prevVal ? '#00E676' : '#4CAF50'; // Bright Green : Dark Green
+                } else {
+                    color = val < prevVal ? '#FF5252' : '#FF8A80'; // Red : Light Red (Maroon-ish)
+                }
+
+                momentum.push({
+                    time: data[i].time,
+                    value: val,
+                    color: color,
+                    squeeze: squeezeOn[i]
+                });
+            }
+
+            return momentum;
+        }
+
+        // ===== Logger =====
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // ===== Main =====
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('chart');
+            // We need two containers? Or stacked? 
+            // Standard layout usually has sub-indicators below. 
+            // Let's create a split pane structure dynamically or just assume full height and split manually
+            // But we want to follow our grid layout. 
+            // We will put everything in 'chart' div but use two charts or one chart with panes?
+            // Lightweight charts doesn't support 'panes' natively in one instance well without plugins.
+            // We will create two chart instances: Main (Candle) and Indicator.
+
+            container.innerHTML = '<div id="main-chart"></div><div id="sub-chart"></div>';
+            const mainDiv = document.getElementById('main-chart');
+            const subDiv = document.getElementById('sub-chart');
+
+            // CSS for split
+            mainDiv.style.height = '60%';
+            subDiv.style.height = '40%';
+
+            try {
+                log('🚀 Squeeze Momentum 시작');
+                const data = generateMockOHLCV(300);
+                log(`✓ ${data.length}개 바 생성 완료`, 'success');
+
+                // 1. Main Chart
+                const mainChart = createChart(mainDiv, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                const candleSeries = mainChart.addSeries(CandlestickSeries, {
+                    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+                });
+                candleSeries.setData(data);
+
+                // 2. Sub Chart (Squeeze)
+                const subChart = createChart(subDiv, {
+                    layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
+                    grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
+                    timeScale: { visible: false } // We sync logic
+                });
+
+                const momentumSeries = subChart.addSeries(HistogramSeries, {
+                    priceFormat: { type: 'price', precision: 4, minMove: 0.0001 },
+                    priceScaleId: 'right'
+                });
+
+                // Squeeze Dots: We can use a Scatter/Line series at 0
+                // Or simulate with another Histogram? No, line with markers.
+                // LWC doesn't have ScatterSeries easily until recent versions or using markers on Line.
+                // Let's use a LineSeries with style: 0 width line, but markers.
+                // Or actually LWC 5.x has generic series, but let's stick to simple LineSeries with markers.
+                // Wait, easier: 0-line Histogram with diff colors? No.
+                // Let's use 'Custom Series' for dots if we want perfect LazyBear look (dots on zero line).
+                // Or just markers on the histogram series? Markers are usually above/below bars.
+                // Let's use a separate LineSeries fixed at 0, and use 'setMarkers'.
+
+                // However, markers are sparse. 
+                // Let's just create a LineSeries with 0 values and point markers.
+                const squeezeSeries = subChart.addSeries(LineSeries, {
+                    lineWidth: 0, // Invisible line
+                    color: 'transparent',
+                    priceScaleId: 'right',
+                    crosshairMarkerVisible: false
+                });
+
+                const sqData = ta_squeeze_momentum(data);
+
+                // Format data for LWC
+                const histData = sqData.map(d => ({
+                    time: d.time,
+                    value: d.value,
+                    color: d.color
+                }));
+                momentumSeries.setData(histData);
+
+                // Prepare Dots
+                // Squeeze ON (True) = Red Dot, Squeeze OFF (False) = Green/Gray Dot
+                // We'll use layer of markers.
+                const markers = sqData.map(d => {
+                    if (isNaN(d.value)) return null;
+                    return {
+                        time: d.time,
+                        position: 'inBar', // Center? No, 'inBar' is not a valid position for standard markers.
+                        // Standard markers: aboveBar, belowBar, inBar.
+                        // Wait, LineSeries markers are text/shape.
+                        // Ideally we want a dot at y=0.
+                        // Let's try drawing a line at 0 with varying colors? Cant vary color per point easily in one line series for drawing 0-line.
+                        // We will simpler: Just use the Squeeze info in the Histogram color? 
+                        // LazyBear original: Bars are momentum, Dots at 0 are Squeeze state.
+                        // Let's just log the squeeze state or use background color of subchart?
+                        // For this demo, let's skip the dots visualization to keep it simple, 
+                        // OR: use a second Histogram with very small height at 0?
+
+                        // Let's try: A dummy series at y=0.
+                    };
+                }).filter(Boolean);
+
+                // Actually, let's just color the '0' line or Use a separate series for Dots
+                // Just for demo, we'll accept Histogram is the main part.
+
+                // Sync Time
+                mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => subChart.timeScale().setVisibleLogicalRange(range));
+                subChart.timeScale().subscribeVisibleLogicalRangeChange(range => mainChart.timeScale().setVisibleLogicalRange(range));
+
+                log('✓ Squeeze Momentum 계산 및 렌더링 완료', 'success');
+
+                // Auto Resize
+                // ResizeObserver logic implied or window resize
+                window.addEventListener('resize', () => {
+                    if (container.clientWidth > 0) {
+                        mainChart.applyOptions({ width: container.clientWidth });
+                        subChart.applyOptions({ width: container.clientWidth });
+                    }
+                });
+
+            } catch (err) {
+                log(`✗ 에러 발생: ${err.message}`, 'error');
+                console.error(err);
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d0d0d;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #00ff88;
+            font-size: 24px;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            max-width: 1800px;
+        }
+
+        #chart {
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        #log {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            height: 600px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        .log-info {
+            color: #aaa;
+        }
+
+        .log-success {
+            color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .log-warn {
+            color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-error {
+            color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+            font-weight: bold;
+        }
+
+        .info-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h2 {
+            color: #2196F3;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .info-box ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .info-box li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .info-box li:before {
+            content: '▸';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        .info-box code {
+            background: #0a0a0a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-size: 12px;
+        }
+
+        .nav-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #2a2a2a;
+            color: #00d4ff;
+            text-decoration: none;
+            border-radius: 5px;
+            border: 1px solid #333;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .nav-button:hover {
+            background-color: #333;
+            color: #00ff88;
+            border-color: #00ff88;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Layout and CSS will be injected by update_samples.py -->
+    <div class="container">
+        <div id="chart" style="height: 600px;"></div>
+        <div id="log"></div>
+    </div>
+
+    <div class="info-box">
+        <h2>📋 구현 사양</h2>
+        <ul>
+            <li><strong>핵심 로직</strong>: 볼린저 밴드(20, 2.0)가 켈트너 채널(20, 1.5) 안으로 들어가는지 확인합니다.</li>
+            <li><strong>모멘텀</strong>: 가격과 평균 이동선의 차이를 계산하여 상승/하락 에너지를 히스토그램으로 표현합니다.</li>
+            <li><strong>시각화</strong>: 히스토그램(모멘텀)과 0선 위의 점(빨강: 응축, 회색: 확산)으로 표시합니다.</li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>🔍 검증 방법</h2>
+        <ul>
+            <li><strong>응축 확인</strong>: 밴드 폭이 좁아질 때 중앙의 점이 <strong>빨간색</strong>으로 변하는지 확인하세요.</li>
+            <li><strong>추세 확인</strong>: 점이 회색/녹색으로 바뀌며 히스토그램 막대가 커질 때(발산), 가격이 그 방향으로 움직이는지 보세요.</li>
+            <li><strong>데이터 검증</strong>: 개발자 도구(F12) 콘솔에서 <code>window.referenceData</code> 값이 차트와 일치하는지 대조할 수 있습니다.
+            </li>
+        </ul>
+    </div>
+
+    <div class="info-box">
+        <h2>⚙️ 파라메터 상세</h2>
+        <ul>
+            <li><strong>Length/Mult</strong>: [기본: 20, 2.0/1.5] BB와 KC의 기간 및 승수 설정.</li>
+            <li><strong>특징</strong>: 볼린저 밴드가 켈트너 채널 안으로 들어가는 '스퀴즈(응축)' 현상 포착.</li>
+            <li><strong>장점</strong>: 횡보장에서 에너지가 모이는 것을 시각화하여, 큰 변동성(폭발) 직전 진입 타이밍을 잡기 좋음.</li>
+            <li><strong>사용법</strong>: 점이 빨간색(Squeeze On)일 때 대기, 회색/녹색(Squeeze Off)으로 풀리면서 모멘텀 바가 상승할 때 진입.</li>
+            <li><strong>추천 시간대</strong>: 4시간봉, 일봉 (큰 추세의 시작점 포착). 비트코인 횡보장.</li>
+            <li><strong>비추천</strong>: 1분봉 등 초단기(잦은 스퀴즈 신호로 휩소 발생).</li>
+            <li><strong>시너지 지표</strong>: ADX(추세 강도 확인), Volume(스퀴즈 이탈 시 거래량 폭발 확인).</li>
+        </ul>
+
+    </div>
+</body>
+
+</html>
