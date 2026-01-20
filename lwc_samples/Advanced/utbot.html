@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>UT Bot Alert Reference</title>
     <script type="module">
-        import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
+        import { createChart, CandlestickSeries, LineSeries, HistogramSeries, createSeriesMarkers } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
 
         // ===== Mock Data =====
         function generateMockOHLCV(bars = 200) {
@@ -233,7 +233,8 @@
                         });
                     }
                 });
-                candleSeries.setMarkers(markers);
+                // v5: createSeriesMarkers 함수 사용
+                createSeriesMarkers(candleSeries, markers);
                 log(`✓ ${markers.length}개 Buy/Sell 마커 추가`, 'success');
 
 
@@ -383,7 +384,7 @@
             color: #00ff88;
             border-color: #00ff88;
         }
-    
+
         * {
             margin: 0;
             padding: 0;
@@ -492,7 +493,7 @@
             left: 0;
             color: #00ff88;
         }
-        
+
         .info-box code {
             background: #0a0a0a;
             padding: 2px 6px;
@@ -520,7 +521,7 @@
             border-color: #00ff88;
         }
 
-    
+
         * {
             margin: 0;
             padding: 0;
@@ -629,7 +630,7 @@
             left: 0;
             color: #00ff88;
         }
-        
+
         .info-box code {
             background: #0a0a0a;
             padding: 2px 6px;
@@ -657,7 +658,7 @@
             border-color: #00ff88;
         }
 
-    
+
         * {
             margin: 0;
             padding: 0;
@@ -766,7 +767,7 @@
             left: 0;
             color: #00ff88;
         }
-        
+
         .info-box code {
             background: #0a0a0a;
             padding: 2px 6px;
@@ -793,7 +794,6 @@
             color: #00ff88;
             border-color: #00ff88;
         }
-
     </style>
 </head>
 
@@ -825,7 +825,7 @@
         </ul>
     </div>
 
-    
+
     <div class="info-box">
         <h2>⚙️ 파라메터 상세</h2>
         <ul>
@@ -837,7 +837,7 @@
             <li><strong>비추천</strong>: 1분봉 횡보.</li>
             <li><strong>시너지 지표</strong>: Key Level(지지/저항) 확인 후 신호 진입.</li>
         </ul>
-    
+
     </div>
 
     <div style="text-align: center; margin-bottom: 30px;">
