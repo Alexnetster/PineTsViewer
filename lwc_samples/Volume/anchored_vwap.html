@@ -4,6 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="../common/responsive.css">
     <title>Anchored VWAP Reference</title>
     <script type="module">
         import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
@@ -420,9 +421,16 @@
 </head>
 
 <body>
+    <h1>📊 Anchored VWAP Reference</h1>
+    <div class="subtitle">Pine Script: anchored_vwap.pine → Pure LWC TypeScript Implementation (Overlay)</div>
+
     <div class="container">
-        <div id="chart" style="height: 600px;"></div>
+        <div id="chart"></div>
         <div id="log"></div>
+    </div>
+
+    <div style="margin-top: 20px;">
+        <a href="../index.html" class="nav-button">⬅️ Back to Index</a>
     </div>
 
     <div class="info-box">

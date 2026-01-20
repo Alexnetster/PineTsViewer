@@ -4,6 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="../common/responsive.css">
     <title>UT Bot Alert Reference</title>
     <script type="module">
         import { createChart, CandlestickSeries, LineSeries, HistogramSeries, createSeriesMarkers } from 'https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.mjs';
@@ -166,7 +167,7 @@
                     layout: { background: { type: 'solid', color: '#1a1a1a' }, textColor: '#d1d4dc' },
                     grid: { vertLines: { color: '#2b2b2b' }, horzLines: { color: '#2b2b2b' } },
                     width: mainContainer.clientWidth,
-                    height: 500,
+                    height: window.innerWidth <= 768 ? 300 : 500,
                     timeScale: { timeVisible: true, secondsVisible: false }
                 });
 
@@ -245,7 +246,10 @@
 
                 // Auto Resize
                 window.addEventListener('resize', () => {
-                    mainChart.applyOptions({ width: mainContainer.clientWidth });
+                    mainChart.applyOptions({
+                        width: mainContainer.clientWidth,
+                        height: window.innerWidth <= 768 ? 300 : 500
+                    });
                 });
 
 
